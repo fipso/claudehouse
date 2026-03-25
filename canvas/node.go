@@ -16,4 +16,8 @@ type Node interface {
 	Focused() bool
 	SetFocused(bool)
 	Free()
+	Closing() bool
+	StartCloseAnim()
+	StartSpawnAnim()
+	AnimDone() bool
 }

@@ -51,6 +51,7 @@ func NewCanvas() *Canvas {
 }
 
 func (c *Canvas) AddNode(n Node) {
+	n.StartSpawnAnim()
 	c.Nodes = append(c.Nodes, n)
 }
 
@@ -58,23 +59,21 @@ func (c *Canvas) RemoveNode(idx int) {
 	if idx < 0 || idx >= len(c.Nodes) {
 		return
 	}
-	c.Nodes[idx].Free()
-	c.Nodes = append(c.Nodes[:idx], c.Nodes[idx+1:]...)
+	node := c.Nodes[idx]
+	if node.Closing() {
+		return
+	}
+	node.StartCloseAnim()
+	node.SetFocused(false)
 	if c.FocusedIdx == idx {
 		c.FocusedIdx = -1
-	} else if c.FocusedIdx > idx {
-		c.FocusedIdx--
 	}
-	// Update selected indices after removal
+	// Remove from selection
 	newSelected := c.Selected[:0]
 	for _, s := range c.Selected {
-		if s == idx {
-			continue
+		if s != idx {
+			newSelected = append(newSelected, s)
 		}
-		if s > idx {
-			s--
-		}
-		newSelected = append(newSelected, s)
 	}
 	c.Selected = newSelected
 }
@@ -82,6 +81,32 @@ func (c *Canvas) RemoveNode(idx int) {
 func (c *Canvas) Update() {
 	for _, n := range c.Nodes {
 		n.Update()
+	}
+
+	// Sweep nodes whose close animation is done
+	for i := len(c.Nodes) - 1; i >= 0; i-- {
+		if c.Nodes[i].AnimDone() {
+			c.Nodes[i].Free()
+			c.Nodes = append(c.Nodes[:i], c.Nodes[i+1:]...)
+			// Adjust FocusedIdx
+			if c.FocusedIdx == i {
+				c.FocusedIdx = -1
+			} else if c.FocusedIdx > i {
+				c.FocusedIdx--
+			}
+			// Adjust Selected indices
+			newSelected := c.Selected[:0]
+			for _, s := range c.Selected {
+				if s == i {
+					continue
+				}
+				if s > i {
+					s--
+				}
+				newSelected = append(newSelected, s)
+			}
+			c.Selected = newSelected
+		}
 	}
 }
 

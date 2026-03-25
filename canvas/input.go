@@ -44,6 +44,12 @@ func (c *Canvas) HandleInput() {
 func (c *Canvas) handleFocusedInput(mousePos, mouseWorld rl.Vector2) {
 	node := c.Nodes[c.FocusedIdx]
 
+	// If focused node is closing, unfocus and bail
+	if node.Closing() {
+		c.FocusedIdx = -1
+		return
+	}
+
 	// Active resize drag
 	if c.resizing {
 		if rl.IsMouseButtonDown(rl.MouseButtonLeft) {
@@ -145,6 +151,9 @@ func (c *Canvas) handleFocusedInput(mousePos, mouseWorld rl.Vector2) {
 			c.FocusedIdx = -1
 			// Check if clicking on another node
 			for i := len(c.Nodes) - 1; i >= 0; i-- {
+				if c.Nodes[i].Closing() {
+					continue
+				}
 				if c.Nodes[i].Contains(mouseWorld) {
 					c.FocusedIdx = i
 					c.Nodes[i].SetFocused(true)
@@ -300,6 +309,9 @@ func (c *Canvas) handleCanvasInput(mousePos, mouseWorld rl.Vector2) {
 		// Alt+left-click → single node move
 		if rl.IsKeyDown(rl.KeyLeftAlt) {
 			for i := len(c.Nodes) - 1; i >= 0; i-- {
+				if c.Nodes[i].Closing() {
+					continue
+				}
 				if c.Nodes[i].Contains(mouseWorld) {
 					c.movingNode = i
 					nodePos := c.Nodes[i].Position()
@@ -319,6 +331,9 @@ func (c *Canvas) handleCanvasInput(mousePos, mouseWorld rl.Vector2) {
 		// Check if clicking on a node
 		hitIdx := -1
 		for i := len(c.Nodes) - 1; i >= 0; i-- {
+			if c.Nodes[i].Closing() {
+				continue
+			}
 			if c.Nodes[i].Contains(mouseWorld) {
 				hitIdx = i
 				break
@@ -390,6 +405,9 @@ func (c *Canvas) updateSelectionFromRect() {
 
 	c.Selected = nil
 	for i, n := range c.Nodes {
+		if n.Closing() {
+			continue
+		}
 		if nodeIntersectsRect(n, topLeft, bottomRight) {
 			c.Selected = append(c.Selected, i)
 		}
@@ -438,7 +456,7 @@ func (c *Canvas) focusDirection(dx, dy int) {
 	bestScore := math.MaxFloat64
 
 	for i, n := range c.Nodes {
-		if i == c.FocusedIdx {
+		if i == c.FocusedIdx || n.Closing() {
 			continue
 		}
 		nx, ny := nodeCenter(n)

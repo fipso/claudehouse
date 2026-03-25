@@ -36,7 +36,7 @@ func utf8Encode(cp uint32, buf []byte) int {
 }
 
 func DrawTerminal(rs *ghostty.RenderState, ri *ghostty.RowIterator, rc *ghostty.RowCells,
-	font rl.Font, cellW, cellH, fontSize, padX, padY int) {
+	font rl.Font, cellW, cellH, fontSize, padX, padY int, alpha uint8) {
 
 	colors := rs.GetColors()
 	defaultFg := colors.Foreground
@@ -65,7 +65,7 @@ func DrawTerminal(rs *ghostty.RenderState, ri *ghostty.RowIterator, rc *ghostty.
 				// Empty cell — may have bg color
 				if bg, ok := rc.BgColor(); ok {
 					rl.DrawRectangle(int32(x), int32(y), int32(cellW), int32(cellH),
-						rl.Color{R: bg.R, G: bg.G, B: bg.B, A: 255})
+						rl.Color{R: bg.R, G: bg.G, B: bg.B, A: alpha})
 				}
 				x += cellW
 				continue
@@ -107,12 +107,12 @@ func DrawTerminal(rs *ghostty.RenderState, ri *ghostty.RowIterator, rc *ghostty.
 				hasBg = true
 			}
 
-			rayFg := rl.Color{R: fg.R, G: fg.G, B: fg.B, A: 255}
+			rayFg := rl.Color{R: fg.R, G: fg.G, B: fg.B, A: alpha}
 
 			// Draw background
 			if hasBg {
 				rl.DrawRectangle(int32(x), int32(y), int32(cellW), int32(cellH),
-					rl.Color{R: bgRgb.R, G: bgRgb.G, B: bgRgb.B, A: 255})
+					rl.Color{R: bgRgb.R, G: bgRgb.G, B: bgRgb.B, A: alpha})
 			}
 
 			// Italic offset
@@ -147,8 +147,12 @@ func DrawTerminal(rs *ghostty.RenderState, ri *ghostty.RowIterator, rc *ghostty.
 		}
 		curX := padX + int(cx)*cellW
 		curY := padY + int(cy)*cellH
+		curAlpha := uint8(128)
+		if alpha < 255 {
+			curAlpha = uint8(uint16(curAlpha) * uint16(alpha) / 255)
+		}
 		rl.DrawRectangle(int32(curX), int32(curY), int32(cellW), int32(cellH),
-			rl.Color{R: curColor.R, G: curColor.G, B: curColor.B, A: 128})
+			rl.Color{R: curColor.R, G: curColor.G, B: curColor.B, A: curAlpha})
 	}
 
 	rs.SetClean()

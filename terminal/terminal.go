@@ -2,11 +2,23 @@ package terminal
 
 import (
 	"claudehouse/ghostty"
+	"math"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
 const Pad = 4
+
+const (
+	animNone  = 0
+	animSpawn = 1
+	animClose = 2
+)
+
+const (
+	animSpawnDuration = 0.5
+	animCloseDuration = 0.25
+)
 
 type TerminalNode struct {
 	terminal     *ghostty.Terminal
@@ -29,6 +41,11 @@ type TerminalNode struct {
 
 	focused bool
 	title   string
+
+	animTime float64
+	animType int
+	closing  bool
+	animDone bool
 }
 
 func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, cellW, cellH int, shell string) (*TerminalNode, error) {
@@ -136,6 +153,21 @@ func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, 
 }
 
 func (tn *TerminalNode) Update() {
+	// Tick animation
+	if tn.animType != animNone {
+		tn.animTime += float64(rl.GetFrameTime())
+		switch tn.animType {
+		case animSpawn:
+			if tn.animTime >= animSpawnDuration {
+				tn.animType = animNone
+			}
+		case animClose:
+			if tn.animTime >= animCloseDuration {
+				tn.animDone = true
+			}
+		}
+	}
+
 	// Drain PTY output into terminal
 	for {
 		select {
@@ -156,29 +188,86 @@ done:
 func (tn *TerminalNode) Draw(camera rl.Camera2D) {
 	tn.renderState.Update(tn.terminal)
 
+	// Compute animation offset and alpha
+	var offsetX, offsetY float32
+	alpha := uint8(255)
+
+	switch tn.animType {
+	case animSpawn:
+		t := tn.animTime
+		if t < 0.2 {
+			// Slide phase: Y +60 → 0, opacity 0 → 1
+			p := t / 0.2
+			ease := 1.0 - (1.0-p)*(1.0-p) // ease-out quadratic
+			offsetY = float32((1.0 - ease) * 60.0)
+			alpha = uint8(ease * 255.0)
+		} else {
+			// Jiggle phase: small X oscillation, damped sine
+			jt := t - 0.2
+			jDur := animSpawnDuration - 0.2
+			p := jt / jDur
+			damping := 1.0 - p
+			offsetX = float32(damping * 8.0 * math.Sin(p*math.Pi*3))
+		}
+	case animClose:
+		p := tn.animTime / animCloseDuration
+		if p > 1.0 {
+			p = 1.0
+		}
+		ease := p * p // ease-in quadratic
+		offsetY = float32(ease * 40.0)
+		alpha = uint8((1.0 - ease) * 255.0)
+	}
+
+	drawX := tn.Pos.X + offsetX
+	drawY := tn.Pos.Y + offsetY
+
 	// Calculate screen position including padding
-	padX := int(tn.Pos.X) + Pad
-	padY := int(tn.Pos.Y) + Pad
+	padX := int(drawX) + Pad
+	padY := int(drawY) + Pad
 
 	// Draw terminal background
 	colors := tn.renderState.GetColors()
 	bg := colors.Background
 	width := int(tn.cols)*tn.cellW + 2*Pad
 	height := int(tn.rows)*tn.cellH + 2*Pad
-	rl.DrawRectangle(int32(tn.Pos.X), int32(tn.Pos.Y), int32(width), int32(height),
-		rl.Color{R: bg.R, G: bg.G, B: bg.B, A: 255})
+	rl.DrawRectangle(int32(drawX), int32(drawY), int32(width), int32(height),
+		rl.Color{R: bg.R, G: bg.G, B: bg.B, A: alpha})
 
 	// Draw border if focused
 	if tn.focused {
-		rl.DrawRectangleLines(int32(tn.Pos.X)-1, int32(tn.Pos.Y)-1, int32(width)+2, int32(height)+2,
-			rl.Color{R: 100, G: 150, B: 255, A: 255})
+		rl.DrawRectangleLines(int32(drawX)-1, int32(drawY)-1, int32(width)+2, int32(height)+2,
+			rl.Color{R: 100, G: 150, B: 255, A: alpha})
 	}
 
 	DrawTerminal(tn.renderState, tn.rowIter, tn.rowCells, tn.font,
-		tn.cellW, tn.cellH, tn.fontSize, padX, padY)
+		tn.cellW, tn.cellH, tn.fontSize, padX, padY, alpha)
+}
+
+func (tn *TerminalNode) Closing() bool {
+	return tn.closing
+}
+
+func (tn *TerminalNode) StartCloseAnim() {
+	tn.closing = true
+	tn.animType = animClose
+	tn.animTime = 0
+	tn.animDone = false
+}
+
+func (tn *TerminalNode) StartSpawnAnim() {
+	tn.animType = animSpawn
+	tn.animTime = 0
+}
+
+func (tn *TerminalNode) AnimDone() bool {
+	return tn.animDone
 }
 
 func (tn *TerminalNode) HandleKeyInput() {
+	if tn.closing {
+		return
+	}
 	tn.keyEncoder.SetOptFromTerminal(tn.terminal)
 
 	// Drain printable characters
@@ -278,6 +367,9 @@ func (tn *TerminalNode) HandleKeyInput() {
 }
 
 func (tn *TerminalNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vector2) {
+	if tn.closing {
+		return
+	}
 	tn.mouseEncoder.SetOptFromTerminal(tn.terminal)
 
 	// Set encoder size relative to the terminal node's position

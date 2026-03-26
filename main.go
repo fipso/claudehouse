@@ -2,9 +2,16 @@ package main
 
 import (
 	"embed"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"runtime"
 
+	"claudehouse/agent"
 	"claudehouse/canvas"
+	"claudehouse/proxy"
+	"claudehouse/sandbox"
 	"claudehouse/terminal"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
@@ -81,13 +88,65 @@ func main() {
 		cellH = 1
 	}
 
+	// Initialize MITM proxy for intercepting Claude Code API traffic
+	homeDir, _ := os.UserHomeDir()
+	configDir := filepath.Join(homeDir, ".config", "claudehouse")
+	mitmProxy, err := proxy.NewProxy(configDir)
+	if err != nil {
+		log.Printf("WARNING: failed to start MITM proxy: %v", err)
+	}
+
+	// Helper to create proxy env vars for a terminal.
+	termCounter := 0
+	makeProxyEnv := func(sandboxed bool) []string {
+		if mitmProxy == nil {
+			return nil
+		}
+		bindHost := "127.0.0.1"
+		if sandboxed {
+			bindHost = "0.0.0.0"
+		}
+		termCounter++
+		termID := fmt.Sprintf("term-%d", termCounter)
+		tp, err := mitmProxy.StartTerminalProxy(termID, bindHost)
+		if err != nil {
+			log.Printf("WARNING: failed to start terminal proxy: %v", err)
+			return nil
+		}
+		proxyURL := fmt.Sprintf("http://127.0.0.1:%d", tp.Port)
+		env := []string{
+			"HTTPS_PROXY=" + proxyURL,
+			"HTTP_PROXY=" + proxyURL,
+			"NODE_EXTRA_CA_CERTS=" + mitmProxy.CA.CertPath,
+		}
+		if sandboxed {
+			hostIP, err := sandbox.HostIP()
+			if err == nil {
+				proxyURL = fmt.Sprintf("http://%s:%d", hostIP, tp.Port)
+				env = []string{
+					"HTTPS_PROXY=" + proxyURL,
+					"HTTP_PROXY=" + proxyURL,
+					"NODE_EXTRA_CA_CERTS=" + mitmProxy.CA.CertPath,
+					"CLAUDEHOUSE_PROXY_HOST=" + hostIP,
+					fmt.Sprintf("CLAUDEHOUSE_PROXY_PORT=%d", tp.Port),
+				}
+			} else {
+				log.Printf("WARNING: could not determine host IP for sandbox proxy: %v", err)
+			}
+		}
+		return env
+	}
+	// Avoid unused variable warning when proxy is nil
+	_ = makeProxyEnv
+
 	// Create canvas
 	c := canvas.NewCanvas()
 	defer c.FreeAll()
 
 	// Set up the node creation function
 	canvas.CreateNodeFunc = func(pos rl.Vector2) canvas.Node {
-		tn, err := terminal.NewTerminalNode(pos, 80, 24, font, int(fontSizePx), cellW, cellH, "", canvas.SandboxMode)
+		proxyEnv := makeProxyEnv(canvas.SandboxMode)
+		tn, err := terminal.NewTerminalNode(pos, 80, 24, font, int(fontSizePx), cellW, cellH, "", canvas.SandboxMode, proxyEnv)
 		if err != nil {
 			rl.TraceLog(rl.LogError, "Failed to create terminal: %s", err.Error())
 			return nil
@@ -96,8 +155,9 @@ func main() {
 	}
 
 	// Create initial terminal
+	proxyEnv := makeProxyEnv(false)
 	term, err := terminal.NewTerminalNode(
-		rl.Vector2{X: 50, Y: 50}, 80, 24, font, int(fontSizePx), cellW, cellH, "", false)
+		rl.Vector2{X: 50, Y: 50}, 80, 24, font, int(fontSizePx), cellW, cellH, "", false, proxyEnv)
 	if err != nil {
 		panic("failed to create terminal: " + err.Error())
 	}
@@ -105,8 +165,129 @@ func main() {
 	c.FocusedIdx = 0
 	term.SetFocused(true)
 
+	// Track agent nodes: by stream ID for event routing, by terminal ID for layout.
+	agentByStream := map[string]*agent.AgentNode{}
+	agentsByTerminal := map[string][]*agent.AgentNode{}
+
+	// findTerminalNode finds the terminal node matching a terminal ID.
+	// Terminal IDs are "term-N" and terminals are created in order.
+	findTerminalNode := func(terminalID string) (rl.Vector2, rl.Vector2, bool) {
+		// Parse the terminal index from "term-N"
+		var idx int
+		if _, err := fmt.Sscanf(terminalID, "term-%d", &idx); err != nil {
+			return rl.Vector2{}, rl.Vector2{}, false
+		}
+		// Find the idx-th non-agent node (terminal nodes are created first)
+		termIdx := 0
+		for _, node := range c.Nodes {
+			if _, isAgent := node.(*agent.AgentNode); isAgent {
+				continue
+			}
+			termIdx++
+			if termIdx == idx {
+				return node.Position(), node.Size(), true
+			}
+		}
+		return rl.Vector2{}, rl.Vector2{}, false
+	}
+
 	for !rl.WindowShouldClose() {
 		c.HandleInput()
+
+		// Drain proxy events and create/update agent nodes.
+		if mitmProxy != nil {
+			for {
+				select {
+				case evt := <-mitmProxy.Registry.Events:
+					switch evt.Type {
+					case "stream_start":
+						// Find parent terminal position and size.
+						parentPos, parentSize, found := findTerminalNode(evt.TerminalID)
+						if !found {
+							// Fallback: use first node
+							if len(c.Nodes) > 0 {
+								parentPos = c.Nodes[0].Position()
+								parentSize = c.Nodes[0].Size()
+							}
+						}
+
+						// Count active (non-closing) agent nodes for this terminal to determine X offset.
+						existing := agentsByTerminal[evt.TerminalID]
+						activeCount := 0
+						for _, an := range existing {
+							if !an.Closing() {
+								activeCount++
+							}
+						}
+
+						// Place below terminal, tiled rightward.
+						agentWidth := float32(agent.NodeCols*cellW + 2*agent.NodePad)
+						gap := float32(20)
+						agentPos := rl.Vector2{
+							X: parentPos.X + float32(activeCount)*(agentWidth+gap),
+							Y: parentPos.Y + parentSize.Y + gap,
+						}
+
+						an := agent.NewAgentNode(agentPos, font, int(fontSizePx), cellW, cellH,
+							evt.StreamID, evt.TerminalID, evt.IsSubagent)
+						agentByStream[evt.StreamID] = an
+						agentsByTerminal[evt.TerminalID] = append(agentsByTerminal[evt.TerminalID], an)
+						c.AddNode(an)
+					default:
+						if an, ok := agentByStream[evt.StreamID]; ok {
+							an.Events() <- evt
+						}
+					}
+				default:
+					goto eventsDone
+				}
+			}
+		eventsDone:
+		}
+
+		// Clean up despawned agent nodes and reflow positions.
+		agentWidth := float32(agent.NodeCols*cellW + 2*agent.NodePad)
+		gap := float32(20)
+		for termID, nodes := range agentsByTerminal {
+			alive := nodes[:0]
+			for _, an := range nodes {
+				if an.AnimDone() {
+					delete(agentByStream, an.StreamID)
+				} else {
+					alive = append(alive, an)
+				}
+			}
+			if len(alive) == 0 {
+				delete(agentsByTerminal, termID)
+				continue
+			}
+			agentsByTerminal[termID] = alive
+
+			// Reflow: reposition all non-closing agents left-to-right.
+			parentPos, parentSize, found := findTerminalNode(termID)
+			if !found {
+				continue
+			}
+			slot := 0
+			for _, an := range alive {
+				if an.Closing() {
+					continue
+				}
+				targetX := parentPos.X + float32(slot)*(agentWidth+gap)
+				targetY := parentPos.Y + parentSize.Y + gap
+				pos := an.Position()
+				// Smooth slide toward target position.
+				lerpSpeed := float32(10.0 * rl.GetFrameTime())
+				if lerpSpeed > 1.0 {
+					lerpSpeed = 1.0
+				}
+				pos.X += (targetX - pos.X) * lerpSpeed
+				pos.Y += (targetY - pos.Y) * lerpSpeed
+				an.SetPosition(pos)
+				slot++
+			}
+		}
+
 		c.Update()
 
 		rl.BeginDrawing()

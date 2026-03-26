@@ -45,13 +45,14 @@ func defaultShell() string {
 	return "/bin/sh"
 }
 
-func SpawnPTY(shell string, cols, rows uint16, cellW, cellH int) (*PTY, error) {
+func SpawnPTY(shell string, cols, rows uint16, cellW, cellH int, extraEnv []string) (*PTY, error) {
 	if shell == "" {
 		shell = defaultShell()
 	}
 
 	cmd := exec.Command(shell)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = append(cmd.Env, extraEnv...)
 
 	winSize := &pty.Winsize{
 		Rows: rows,
@@ -177,7 +178,7 @@ func recvFd(conn *net.UnixConn) (*os.File, error) {
 	return nil, fmt.Errorf("no fd received")
 }
 
-func SpawnSandboxedPTY(shell string, cols, rows uint16, cellW, cellH int) (*PTY, error) {
+func SpawnSandboxedPTY(shell string, cols, rows uint16, cellW, cellH int, extraEnv []string) (*PTY, error) {
 	if shell == "" {
 		shell = defaultShell()
 	}
@@ -200,15 +201,26 @@ func SpawnSandboxedPTY(shell string, cols, rows uint16, cellW, cellH int) (*PTY,
 	}
 
 	// Generate OCI bundle
-	if err := sandbox.GenerateBundle(bundleDir, shell); err != nil {
+	if err := sandbox.GenerateBundle(bundleDir, shell, extraEnv); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("generate bundle: %w", err)
 	}
 
 	containerID := filepath.Base(bundleDir)
 
-	// Start pasta for network namespace with internet but no local IP access
-	pastaNetns, err := sandbox.StartPasta(bundleDir)
+	// Start pasta for network namespace with internet but no local IP access.
+	// proxyAllowHost/Port are parsed from HTTPS_PROXY in extraEnv (if present).
+	var proxyAllowHost string
+	var proxyAllowPort int
+	for _, e := range extraEnv {
+		if strings.HasPrefix(e, "CLAUDEHOUSE_PROXY_HOST=") {
+			proxyAllowHost = strings.TrimPrefix(e, "CLAUDEHOUSE_PROXY_HOST=")
+		}
+		if strings.HasPrefix(e, "CLAUDEHOUSE_PROXY_PORT=") {
+			fmt.Sscanf(strings.TrimPrefix(e, "CLAUDEHOUSE_PROXY_PORT="), "%d", &proxyAllowPort)
+		}
+	}
+	pastaNetns, err := sandbox.StartPasta(bundleDir, proxyAllowHost, proxyAllowPort)
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("start pasta: %w", err)

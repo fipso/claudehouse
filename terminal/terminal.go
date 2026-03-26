@@ -63,7 +63,7 @@ type TerminalNode struct {
 	selCopyTimer float64 // debounce timer for clipboard copy
 }
 
-func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, cellW, cellH int, shell string, sandboxed bool) (*TerminalNode, error) {
+func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, cellW, cellH int, shell string, sandboxed bool, proxyEnv []string) (*TerminalNode, error) {
 	term, err := ghostty.NewTerminal(cols, rows, 1000)
 	if err != nil {
 		return nil, err
@@ -134,9 +134,9 @@ func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, 
 
 	var p *PTY
 	if sandboxed {
-		p, err = SpawnSandboxedPTY(shell, cols, rows, cellW, cellH)
+		p, err = SpawnSandboxedPTY(shell, cols, rows, cellW, cellH, proxyEnv)
 	} else {
-		p, err = SpawnPTY(shell, cols, rows, cellW, cellH)
+		p, err = SpawnPTY(shell, cols, rows, cellW, cellH, proxyEnv)
 	}
 	if err != nil {
 		mouseEvt.Free()

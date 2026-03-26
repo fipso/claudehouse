@@ -18,7 +18,32 @@ type PastaNetns struct {
 
 // StartPasta creates a network namespace via pasta with internet access
 // but no direct access to local IPs. Returns the netns path for nsenter.
-func StartPasta(bundleDir string) (*PastaNetns, error) {
+// HostIP returns the host's source IP for outbound traffic (used by sandboxed
+// terminals to reach the MITM proxy running on the host).
+func HostIP() (string, error) {
+	out, err := exec.Command("ip", "route", "get", "1.1.1.1").Output()
+	if err != nil {
+		return "", fmt.Errorf("ip route get: %w", err)
+	}
+	// Parse "1.1.1.1 via X.X.X.X dev Y src Z.Z.Z.Z"
+	for _, field := range strings.Fields(string(out)) {
+		if field == "src" {
+			continue
+		}
+		// Find the token after "src"
+		idx := strings.Index(string(out), "src ")
+		if idx >= 0 {
+			rest := strings.Fields(string(out)[idx+4:])
+			if len(rest) > 0 {
+				return rest[0], nil
+			}
+		}
+		break
+	}
+	return "", fmt.Errorf("could not parse host IP from: %s", string(out))
+}
+
+func StartPasta(bundleDir string, proxyAllowHost string, proxyAllowPort int) (*PastaNetns, error) {
 	// Step 1: Create a long-lived process in a new user+network namespace.
 	// --user --map-root-user: create user namespace (allows net namespace without root)
 	// --net: create network namespace
@@ -69,7 +94,7 @@ func StartPasta(bundleDir string) (*PastaNetns, error) {
 	// Step 3: Block access to private/LAN IP ranges inside the namespace.
 	// pasta provides full NAT by default — without these rules, the sandbox
 	// can reach devices on the local network.
-	if err := blockLANAccess(userNsPath, nsPath); err != nil {
+	if err := blockLANAccess(userNsPath, nsPath, proxyAllowHost, proxyAllowPort); err != nil {
 		sleepCmd.Process.Kill()
 		sleepCmd.Wait()
 		return nil, fmt.Errorf("block LAN access: %w", err)
@@ -85,7 +110,24 @@ func StartPasta(bundleDir string) (*PastaNetns, error) {
 
 // blockLANAccess adds iptables/ip6tables rules inside the network namespace
 // to reject all traffic to private (RFC 1918), link-local, and loopback ranges.
-func blockLANAccess(userNsPath, nsPath string) error {
+func blockLANAccess(userNsPath, nsPath string, proxyAllowHost string, proxyAllowPort int) error {
+	// If a proxy is configured, allow traffic to it before blocking private ranges.
+	if proxyAllowHost != "" && proxyAllowPort > 0 {
+		cmd := exec.Command("nsenter",
+			"--user="+userNsPath,
+			"--net="+nsPath,
+			"--preserve-credentials",
+			"--",
+			"iptables", "-A", "OUTPUT",
+			"-d", proxyAllowHost,
+			"-p", "tcp", "--dport", fmt.Sprintf("%d", proxyAllowPort),
+			"-j", "ACCEPT",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("iptables allow proxy %s:%d: %v (%s)", proxyAllowHost, proxyAllowPort, err, string(out))
+		}
+	}
+
 	// IPv4 private and special ranges
 	ipv4Ranges := []string{
 		"10.0.0.0/8",

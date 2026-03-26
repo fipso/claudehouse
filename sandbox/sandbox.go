@@ -10,7 +10,7 @@ import (
 
 // GenerateBundle creates an OCI bundle directory with config.json for runsc.
 // The rootfs is an empty directory — host / is bind-mounted read-only via the spec.
-func GenerateBundle(dir, shell string) error {
+func GenerateBundle(dir, shell string, extraEnv []string) error {
 	rootfs := filepath.Join(dir, "rootfs")
 	if err := os.MkdirAll(rootfs, 0755); err != nil {
 		return fmt.Errorf("create rootfs dir: %w", err)
@@ -35,13 +35,13 @@ func GenerateBundle(dir, shell string) error {
 				"gid": 0,
 			},
 			"args": []string{shell, "-l"},
-			"env": []string{
+			"env": append([]string{
 				"TERM=xterm-256color",
 				"HOME=" + home,
 				"PATH=" + path,
 				"USER=" + u.Username,
 				"SHELL=" + shell,
-			},
+			}, extraEnv...),
 			"cwd": home,
 		},
 		"root": map[string]any{

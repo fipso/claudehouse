@@ -19,6 +19,7 @@ func main() {
 	rl.SetConfigFlags(rl.FlagWindowResizable)
 	rl.InitWindow(1280, 800, "claudehouse")
 	rl.SetTargetFPS(60)
+	rl.SetExitKey(0) // Don't close on Escape
 	defer rl.CloseWindow()
 
 	// Load embedded font at native DPI

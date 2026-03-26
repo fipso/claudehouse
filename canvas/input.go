@@ -18,6 +18,8 @@ func snapToGrid(v rl.Vector2) rl.Vector2 {
 }
 
 var lastEscapeTime time.Time
+var lastClickTime time.Time
+var lastClickPos rl.Vector2
 
 // CreateNodeFunc is set by main to create new terminal nodes.
 var CreateNodeFunc func(pos rl.Vector2) Node
@@ -162,6 +164,7 @@ func (c *Canvas) handleFocusedInput(mousePos, mouseWorld rl.Vector2) {
 			}
 			// No node hit — start camera drag and fall through
 			c.dragging = true
+			c.animatingPos = false
 			return
 		}
 	}
@@ -186,6 +189,15 @@ func (c *Canvas) handleFocusedInput(mousePos, mouseWorld rl.Vector2) {
 		case rl.IsKeyPressed(rl.KeyQ):
 			c.RemoveNode(c.FocusedIdx)
 			return
+		case rl.IsKeyPressed(rl.KeyE):
+			c.zoomToFit(node)
+			return
+		case rl.IsKeyPressed(rl.KeyEqual): // + key
+			c.zoomStep(1, mousePos)
+			return
+		case rl.IsKeyPressed(rl.KeyMinus):
+			c.zoomStep(-1, mousePos)
+			return
 		case rl.IsKeyPressed(rl.KeyEnter):
 			pos := node.Position()
 			size := node.Size()
@@ -209,35 +221,57 @@ func (c *Canvas) handleFocusedInput(mousePos, mouseWorld rl.Vector2) {
 }
 
 func (c *Canvas) handleCanvasInput(mousePos, mouseWorld rl.Vector2) {
-	// Arrow keys → pan camera
+	// Arrow keys → pan camera (cancels any smooth pan animation)
 	panSpeed := float32(500) * rl.GetFrameTime() / c.Camera.Zoom
 	if rl.IsKeyDown(rl.KeyUp) {
 		c.Camera.Target.Y -= panSpeed
+		c.animatingPos = false
 	}
 	if rl.IsKeyDown(rl.KeyDown) {
 		c.Camera.Target.Y += panSpeed
+		c.animatingPos = false
 	}
 	if rl.IsKeyDown(rl.KeyLeft) {
 		c.Camera.Target.X -= panSpeed
+		c.animatingPos = false
 	}
 	if rl.IsKeyDown(rl.KeyRight) {
 		c.Camera.Target.X += panSpeed
 	}
 
-	// Scroll wheel → zoom toward mouse
+	// Scroll wheel → smooth zoom toward mouse
 	wheel := rl.GetMouseWheelMove()
 	if wheel != 0 {
-		mouseWorldBefore := rl.GetScreenToWorld2D(mousePos, c.Camera)
-		c.Camera.Zoom *= (1 + wheel*0.1)
-		if c.Camera.Zoom < 0.1 {
-			c.Camera.Zoom = 0.1
+		c.zoomMousePos = mousePos
+		c.targetZoom *= (1 + wheel*0.15)
+		if c.targetZoom < 0.1 {
+			c.targetZoom = 0.1
 		}
-		if c.Camera.Zoom > 5.0 {
-			c.Camera.Zoom = 5.0
+		if c.targetZoom > 5.0 {
+			c.targetZoom = 5.0
 		}
-		mouseWorldAfter := rl.GetScreenToWorld2D(mousePos, c.Camera)
-		c.Camera.Target.X += mouseWorldBefore.X - mouseWorldAfter.X
-		c.Camera.Target.Y += mouseWorldBefore.Y - mouseWorldAfter.Y
+	}
+
+	// Alt keybinds in unfocused mode
+	if rl.IsKeyDown(rl.KeyLeftAlt) {
+		switch {
+		case rl.IsKeyPressed(rl.KeyH):
+			c.focusDirection(-1, 0)
+			return
+		case rl.IsKeyPressed(rl.KeyJ):
+			c.focusDirection(0, 1)
+			return
+		case rl.IsKeyPressed(rl.KeyK):
+			c.focusDirection(0, -1)
+			return
+		case rl.IsKeyPressed(rl.KeyL):
+			c.focusDirection(1, 0)
+			return
+		case rl.IsKeyPressed(rl.KeyEqual):
+			c.zoomStep(1, mousePos)
+		case rl.IsKeyPressed(rl.KeyMinus):
+			c.zoomStep(-1, mousePos)
+		}
 	}
 
 	// --- Active drags: group move, single-node move, camera pan, selection ---
@@ -356,18 +390,26 @@ func (c *Canvas) handleCanvasInput(mousePos, mouseWorld rl.Vector2) {
 			c.FocusedIdx = hitIdx
 			c.Nodes[hitIdx].SetFocused(true)
 		} else {
-			// Clicked on background → clear selection, start camera drag
+			// Clicked on background → check for double-click to create terminal
+			now := time.Now()
+			dx := mouseWorld.X - lastClickPos.X
+			dy := mouseWorld.Y - lastClickPos.Y
+			dist := dx*dx + dy*dy
+			if now.Sub(lastClickTime) < 300*time.Millisecond && dist < 100 && CreateNodeFunc != nil {
+				node := CreateNodeFunc(snapToGrid(mouseWorld))
+				if node != nil {
+					c.AddNode(node)
+				}
+				lastClickTime = time.Time{}
+				return
+			}
+			lastClickTime = now
+			lastClickPos = mouseWorld
+
+			// Start camera drag
 			c.Selected = nil
 			c.dragging = true
-		}
-		return
-	}
-
-	// Enter → create new terminal at mouse position (snapped to grid)
-	if rl.IsKeyPressed(rl.KeyEnter) && CreateNodeFunc != nil {
-		node := CreateNodeFunc(snapToGrid(mouseWorld))
-		if node != nil {
-			c.AddNode(node)
+			c.animatingPos = false
 		}
 		return
 	}
@@ -463,26 +505,31 @@ func (c *Canvas) focusDirection(dx, dy int) {
 		ddx := nx - cx
 		ddy := ny - cy
 
-		// Filter: candidate must be in the correct direction
-		if dx < 0 && ddx >= 0 {
-			continue
-		}
-		if dx > 0 && ddx <= 0 {
-			continue
-		}
-		if dy < 0 && ddy >= 0 {
-			continue
-		}
-		if dy > 0 && ddy <= 0 {
-			continue
-		}
-
-		// Score with directional bias (penalize off-axis offset)
 		var score float64
-		if dx != 0 {
-			score = ddx*ddx + ddy*ddy*4
+		if c.FocusedIdx < 0 {
+			// No focus: pick nearest node regardless of direction
+			score = ddx*ddx + ddy*ddy
 		} else {
-			score = ddx*ddx*4 + ddy*ddy
+			// Filter: candidate must be in the correct direction
+			if dx < 0 && ddx >= 0 {
+				continue
+			}
+			if dx > 0 && ddx <= 0 {
+				continue
+			}
+			if dy < 0 && ddy >= 0 {
+				continue
+			}
+			if dy > 0 && ddy <= 0 {
+				continue
+			}
+
+			// Score with directional bias (penalize off-axis offset)
+			if dx != 0 {
+				score = ddx*ddx + ddy*ddy*4
+			} else {
+				score = ddx*ddx*4 + ddy*ddy
+			}
 		}
 
 		if score < bestScore {
@@ -503,4 +550,47 @@ func (c *Canvas) focusDirection(dx, dy int) {
 	// Focus new node
 	c.FocusedIdx = bestIdx
 	c.Nodes[bestIdx].SetFocused(true)
+}
+
+func (c *Canvas) zoomStep(dir int, mousePos rl.Vector2) {
+	c.zoomMousePos = mousePos
+	c.targetZoom *= (1 + float32(dir)*0.5)
+	if c.targetZoom < 0.1 {
+		c.targetZoom = 0.1
+	}
+	if c.targetZoom > 5.0 {
+		c.targetZoom = 5.0
+	}
+}
+
+func (c *Canvas) zoomToFit(node Node) {
+	pos := node.Position()
+	size := node.Size()
+
+	screenW := float32(rl.GetScreenWidth())
+	screenH := float32(rl.GetScreenHeight())
+
+	// Compute zoom so the node fills ~80% of the screen
+	margin := float32(0.8)
+	zoomX := screenW * margin / size.X
+	zoomY := screenH * margin / size.Y
+	zoom := zoomX
+	if zoomY < zoom {
+		zoom = zoomY
+	}
+	if zoom < 0.1 {
+		zoom = 0.1
+	}
+	if zoom > 5.0 {
+		zoom = 5.0
+	}
+
+	// Set targets — Update() will smoothly interpolate both
+	c.targetPos = rl.Vector2{
+		X: pos.X + size.X/2,
+		Y: pos.Y + size.Y/2,
+	}
+	c.animatingPos = true
+	c.targetZoom = zoom
+	c.zoomMousePos = rl.Vector2{X: screenW / 2, Y: screenH / 2}
 }

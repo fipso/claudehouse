@@ -33,6 +33,12 @@ type Canvas struct {
 	resizeStartW   uint16       // cols at drag start
 	resizeStartH   uint16       // rows at drag start
 	resizeAnchor   rl.Vector2   // mouse world at drag start
+
+	// Smooth zoom & pan
+	targetZoom   float32
+	zoomMousePos rl.Vector2 // screen-space mouse pos for zoom anchoring
+	targetPos    rl.Vector2 // target camera position for smooth pan
+	animatingPos bool       // whether we're smoothly panning to targetPos
 }
 
 func NewCanvas() *Canvas {
@@ -47,6 +53,7 @@ func NewCanvas() *Canvas {
 		},
 		FocusedIdx: -1,
 		movingNode: -1,
+		targetZoom: 1.0,
 	}
 }
 
@@ -79,6 +86,42 @@ func (c *Canvas) RemoveNode(idx int) {
 }
 
 func (c *Canvas) Update() {
+	// Smooth pan interpolation (for zoom-to-fit)
+	if c.animatingPos {
+		dx := c.targetPos.X - c.Camera.Target.X
+		dy := c.targetPos.Y - c.Camera.Target.Y
+		if dx > -0.5 && dx < 0.5 && dy > -0.5 && dy < 0.5 {
+			c.Camera.Target = c.targetPos
+			c.animatingPos = false
+		} else {
+			c.Camera.Target.X += dx * 0.15
+			c.Camera.Target.Y += dy * 0.15
+		}
+	}
+
+	// Smooth zoom interpolation
+	diff := c.targetZoom - c.Camera.Zoom
+	if diff != 0 {
+		if !c.animatingPos {
+			// Only anchor to mouse when not doing a zoom-to-fit pan
+			mouseWorldBefore := rl.GetScreenToWorld2D(c.zoomMousePos, c.Camera)
+			if diff > -0.001 && diff < 0.001 {
+				c.Camera.Zoom = c.targetZoom
+			} else {
+				c.Camera.Zoom += diff * 0.15
+			}
+			mouseWorldAfter := rl.GetScreenToWorld2D(c.zoomMousePos, c.Camera)
+			c.Camera.Target.X += mouseWorldBefore.X - mouseWorldAfter.X
+			c.Camera.Target.Y += mouseWorldBefore.Y - mouseWorldAfter.Y
+		} else {
+			if diff > -0.001 && diff < 0.001 {
+				c.Camera.Zoom = c.targetZoom
+			} else {
+				c.Camera.Zoom += diff * 0.15
+			}
+		}
+	}
+
 	for _, n := range c.Nodes {
 		n.Update()
 	}
@@ -193,9 +236,9 @@ func (c *Canvas) drawHUD() {
 	// Keybind bar
 	var hints string
 	if c.FocusedIdx >= 0 && c.FocusedIdx < len(c.Nodes) {
-		hints = "2×Esc unfocus  Alt+HJKL navigate  Alt+Enter new  Alt+Q close  drag edge resize"
+		hints = "2×Esc unfocus  Alt+HJKL navigate  Alt+E zoom-fit  Alt+Enter new  Alt+Q close  drag edge resize"
 	} else {
-		hints = "Enter new terminal  Click focus  Alt+Click move  Right-click select  Scroll zoom"
+		hints = "Double-click new terminal  Click focus  Alt+HJKL navigate  Alt+Click move  Right-click select  Scroll zoom"
 	}
 	textW := rl.MeasureText(hints, 14)
 	screenW := int32(rl.GetScreenWidth())

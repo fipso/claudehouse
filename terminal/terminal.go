@@ -46,6 +46,8 @@ type TerminalNode struct {
 	animType int
 	closing  bool
 	animDone bool
+
+	scrollAccum float32
 }
 
 func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, cellW, cellH int, shell string) (*TerminalNode, error) {
@@ -164,6 +166,24 @@ func (tn *TerminalNode) Update() {
 		case animClose:
 			if tn.animTime >= animCloseDuration {
 				tn.animDone = true
+			}
+		}
+	}
+
+	// Smooth scroll: consume accumulated scroll lines
+	if tn.scrollAccum != 0 {
+		consume := tn.scrollAccum * 0.25
+		if consume > -0.5 && consume < 0.5 {
+			lines := int(math.Round(float64(tn.scrollAccum)))
+			if lines != 0 {
+				tn.terminal.ScrollViewport(lines)
+			}
+			tn.scrollAccum = 0
+		} else {
+			lines := int(consume)
+			if lines != 0 {
+				tn.terminal.ScrollViewport(lines)
+				tn.scrollAccum -= float32(lines)
 			}
 		}
 	}
@@ -445,11 +465,7 @@ func (tn *TerminalNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vecto
 			tn.mouseEvent.SetAction(ghostty.MouseActionRelease)
 			tn.mouseEncodeAndWrite()
 		} else {
-			delta := -3
-			if wheel < 0 {
-				delta = 3
-			}
-			tn.terminal.ScrollViewport(delta)
+			tn.scrollAccum += wheel * -5.0
 		}
 	}
 }

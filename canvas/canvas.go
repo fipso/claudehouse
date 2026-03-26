@@ -39,6 +39,10 @@ type Canvas struct {
 	zoomMousePos rl.Vector2 // screen-space mouse pos for zoom anchoring
 	targetPos    rl.Vector2 // target camera position for smooth pan
 	animatingPos bool       // whether we're smoothly panning to targetPos
+
+	// Smooth node position animation
+	nodeAnimIdx    int        // index of node being animated (-1 = none)
+	nodeAnimTarget rl.Vector2 // target position for the animated node
 }
 
 func NewCanvas() *Canvas {
@@ -51,9 +55,10 @@ func NewCanvas() *Canvas {
 			Target: rl.Vector2{X: 0, Y: 0},
 			Zoom:   1.0,
 		},
-		FocusedIdx: -1,
-		movingNode: -1,
-		targetZoom: 1.0,
+		FocusedIdx:  -1,
+		movingNode:  -1,
+		nodeAnimIdx: -1,
+		targetZoom:  1.0,
 	}
 }
 
@@ -96,6 +101,23 @@ func (c *Canvas) Update() {
 		} else {
 			c.Camera.Target.X += dx * 0.15
 			c.Camera.Target.Y += dy * 0.15
+		}
+	}
+
+	// Smooth node position animation
+	if c.nodeAnimIdx >= 0 && c.nodeAnimIdx < len(c.Nodes) {
+		n := c.Nodes[c.nodeAnimIdx]
+		pos := n.Position()
+		dx := c.nodeAnimTarget.X - pos.X
+		dy := c.nodeAnimTarget.Y - pos.Y
+		if dx > -0.5 && dx < 0.5 && dy > -0.5 && dy < 0.5 {
+			n.SetPosition(c.nodeAnimTarget)
+			c.nodeAnimIdx = -1
+		} else {
+			n.SetPosition(rl.Vector2{
+				X: pos.X + dx*0.15,
+				Y: pos.Y + dy*0.15,
+			})
 		}
 	}
 
@@ -236,7 +258,7 @@ func (c *Canvas) drawHUD() {
 	// Keybind bar
 	var hints string
 	if c.FocusedIdx >= 0 && c.FocusedIdx < len(c.Nodes) {
-		hints = "2×Esc unfocus  Alt+HJKL navigate  Alt+E zoom-fit  Alt+Enter new  Alt+Q close  drag edge resize"
+		hints = "2×Esc unfocus  Alt+HJKL navigate  Alt+E zoom-fit  Alt+F fill  Alt+Enter new  Alt+Q close  drag edge resize"
 	} else {
 		hints = "Double-click new terminal  Click focus  Alt+HJKL navigate  Alt+Click move  Right-click select  Scroll zoom"
 	}

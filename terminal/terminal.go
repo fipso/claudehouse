@@ -284,29 +284,9 @@ func (tn *TerminalNode) AnimDone() bool {
 	return tn.animDone
 }
 
-func (tn *TerminalNode) HandleKeyInput() {
-	if tn.closing {
-		return
-	}
-	tn.keyEncoder.SetOptFromTerminal(tn.terminal)
+var keysToCheck []int32
 
-	// Drain printable characters
-	var charUtf8 [64]byte
-	charUtf8Len := 0
-	for {
-		ch := rl.GetCharPressed()
-		if ch == 0 {
-			break
-		}
-		var u8 [4]byte
-		n := utf8Encode(uint32(ch), u8[:])
-		if charUtf8Len+n < len(charUtf8) {
-			copy(charUtf8[charUtf8Len:], u8[:n])
-			charUtf8Len += n
-		}
-	}
-
-	// Build key list
+func init() {
 	specialKeys := []int32{
 		rl.KeySpace, rl.KeyEnter, rl.KeyTab, rl.KeyBackspace, rl.KeyDelete,
 		rl.KeyEscape, rl.KeyUp, rl.KeyDown, rl.KeyLeft, rl.KeyRight,
@@ -317,8 +297,7 @@ func (tn *TerminalNode) HandleKeyInput() {
 		rl.KeyF1, rl.KeyF2, rl.KeyF3, rl.KeyF4, rl.KeyF5, rl.KeyF6,
 		rl.KeyF7, rl.KeyF8, rl.KeyF9, rl.KeyF10, rl.KeyF11, rl.KeyF12,
 	}
-
-	keysToCheck := make([]int32, 0, 26+10+len(specialKeys))
+	keysToCheck = make([]int32, 0, 26+10+len(specialKeys))
 	for k := int32(rl.KeyA); k <= int32(rl.KeyZ); k++ {
 		keysToCheck = append(keysToCheck, k)
 	}
@@ -326,63 +305,96 @@ func (tn *TerminalNode) HandleKeyInput() {
 		keysToCheck = append(keysToCheck, k)
 	}
 	keysToCheck = append(keysToCheck, specialKeys...)
+}
+
+func (tn *TerminalNode) processKey(rlKey int32, action ghostty.KeyAction, charUtf8 *[]byte) {
+	gkey := raylibKeyToGhostty(rlKey)
+	if gkey == ghostty.KeyUnidentified {
+		return
+	}
 
 	mods := getGhosttyMods()
 
+	tn.keyEvent.SetKey(gkey)
+	tn.keyEvent.SetAction(action)
+	tn.keyEvent.SetMods(mods)
+
+	ucp := unshiftedCodepoint(rlKey)
+	tn.keyEvent.SetUnshiftedCodepoint(ucp)
+
+	var consumed ghostty.Mods
+	if ucp != 0 && (mods&ghostty.ModsShift) != 0 {
+		consumed |= ghostty.ModsShift
+	}
+	tn.keyEvent.SetConsumedMods(consumed)
+
+	released := action == ghostty.KeyActionRelease
+
+	if len(*charUtf8) > 0 && !released {
+		tn.keyEvent.SetUtf8(*charUtf8)
+		*charUtf8 = nil
+	} else if cp := controlCharUtf8(rlKey); cp != 0 && !released {
+		tn.keyEvent.SetUtf8([]byte{cp})
+	} else {
+		tn.keyEvent.SetUtf8(nil)
+	}
+
+	var buf [128]byte
+	written := tn.keyEncoder.Encode(tn.keyEvent, buf[:])
+	if written > 0 {
+		tn.pty.Write(buf[:written])
+		*charUtf8 = nil
+	} else if !released {
+		if cp := controlCharUtf8(rlKey); cp != 0 {
+			tn.pty.Write([]byte{cp})
+		}
+	}
+}
+
+func (tn *TerminalNode) HandleKeyInput() {
+	if tn.closing {
+		return
+	}
+	tn.keyEncoder.SetOptFromTerminal(tn.terminal)
+
+	// Drain printable character queue
+	var charUtf8 []byte
+	for {
+		ch := rl.GetCharPressed()
+		if ch == 0 {
+			break
+		}
+		var u8 [4]byte
+		n := utf8Encode(uint32(ch), u8[:])
+		charUtf8 = append(charUtf8, u8[:n]...)
+	}
+
+	// Pass 1: Drain key press queue (event-based, never misses a press)
+	for {
+		rlKey := rl.GetKeyPressed()
+		if rlKey == 0 {
+			break
+		}
+		tn.processKey(rlKey, ghostty.KeyActionPress, &charUtf8)
+	}
+
+	// Pass 2: Check key repeats (poll-based, fine for repeats)
 	for _, rlKey := range keysToCheck {
-		pressed := rl.IsKeyPressed(rlKey)
-		repeated := rl.IsKeyPressedRepeat(rlKey)
-		released := rl.IsKeyReleased(rlKey)
-		if !pressed && !repeated && !released {
-			continue
-		}
-
-		gkey := raylibKeyToGhostty(rlKey)
-		if gkey == ghostty.KeyUnidentified {
-			continue
-		}
-
-		var action ghostty.KeyAction
-		switch {
-		case released:
-			action = ghostty.KeyActionRelease
-		case pressed:
-			action = ghostty.KeyActionPress
-		default:
-			action = ghostty.KeyActionRepeat
-		}
-
-		tn.keyEvent.SetKey(gkey)
-		tn.keyEvent.SetAction(action)
-		tn.keyEvent.SetMods(mods)
-
-		ucp := unshiftedCodepoint(rlKey)
-		tn.keyEvent.SetUnshiftedCodepoint(ucp)
-
-		var consumed ghostty.Mods
-		if ucp != 0 && (mods&ghostty.ModsShift) != 0 {
-			consumed |= ghostty.ModsShift
-		}
-		tn.keyEvent.SetConsumedMods(consumed)
-
-		if charUtf8Len > 0 && !released {
-			tn.keyEvent.SetUtf8(charUtf8[:charUtf8Len])
-			charUtf8Len = 0
-		} else {
-			tn.keyEvent.SetUtf8(nil)
-		}
-
-		var buf [128]byte
-		written := tn.keyEncoder.Encode(tn.keyEvent, buf[:])
-		if written > 0 {
-			tn.pty.Write(buf[:written])
-			charUtf8Len = 0
+		if rl.IsKeyPressedRepeat(rlKey) {
+			tn.processKey(rlKey, ghostty.KeyActionRepeat, &charUtf8)
 		}
 	}
 
-	// Fallback: if UTF-8 text unconsumed, write directly
-	if charUtf8Len > 0 {
-		tn.pty.Write(charUtf8[:charUtf8Len])
+	// Pass 3: Check key releases (poll-based, fine for releases)
+	for _, rlKey := range keysToCheck {
+		if rl.IsKeyReleased(rlKey) {
+			tn.processKey(rlKey, ghostty.KeyActionRelease, &charUtf8)
+		}
+	}
+
+	// Write any remaining unconsumed chars directly
+	if len(charUtf8) > 0 {
+		tn.pty.Write(charUtf8)
 	}
 }
 

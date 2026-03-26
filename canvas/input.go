@@ -192,6 +192,9 @@ func (c *Canvas) handleFocusedInput(mousePos, mouseWorld rl.Vector2) {
 		case rl.IsKeyPressed(rl.KeyE):
 			c.zoomToFit(node)
 			return
+		case rl.IsKeyPressed(rl.KeyF):
+			c.fillViewport(node)
+			return
 		case rl.IsKeyPressed(rl.KeyEqual): // + key
 			c.zoomStep(1, mousePos)
 			return
@@ -201,10 +204,14 @@ func (c *Canvas) handleFocusedInput(mousePos, mouseWorld rl.Vector2) {
 		case rl.IsKeyPressed(rl.KeyEnter):
 			pos := node.Position()
 			size := node.Size()
+			cellW, cellH := node.CellSize()
+			cols := uint16((int(size.X) - 2*terminalPad) / cellW)
+			rows := uint16((int(size.Y) - 2*terminalPad) / cellH)
 			newPos := snapToGrid(rl.Vector2{X: pos.X + size.X + gridSize, Y: pos.Y})
 			if !c.wouldOverlap(newPos, size) && CreateNodeFunc != nil {
 				newNode := CreateNodeFunc(newPos)
 				if newNode != nil {
+					newNode.SetSize(cols, rows)
 					node.SetFocused(false)
 					c.AddNode(newNode)
 					c.FocusedIdx = len(c.Nodes) - 1
@@ -560,6 +567,37 @@ func (c *Canvas) zoomStep(dir int, mousePos rl.Vector2) {
 	}
 	if c.targetZoom > 5.0 {
 		c.targetZoom = 5.0
+	}
+}
+
+func (c *Canvas) fillViewport(node Node) {
+	const gap = 40 // pixels of padding around the terminal
+
+	screenW := float32(rl.GetScreenWidth())
+	screenH := float32(rl.GetScreenHeight())
+
+	// Available world-space size at current zoom
+	availW := (screenW - 2*gap) / c.Camera.Zoom
+	availH := (screenH - 2*gap) / c.Camera.Zoom
+
+	cellW, cellH := node.CellSize()
+	cols := uint16((int(availW) - 2*terminalPad) / cellW)
+	rows := uint16((int(availH) - 2*terminalPad) / cellH)
+	if cols < 2 {
+		cols = 2
+	}
+	if rows < 2 {
+		rows = 2
+	}
+
+	node.SetSize(cols, rows)
+
+	// Smoothly animate terminal to center of viewport
+	size := node.Size()
+	c.nodeAnimIdx = c.FocusedIdx
+	c.nodeAnimTarget = rl.Vector2{
+		X: c.Camera.Target.X - size.X/2,
+		Y: c.Camera.Target.Y - size.Y/2,
 	}
 }
 

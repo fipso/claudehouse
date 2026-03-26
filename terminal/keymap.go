@@ -104,6 +104,14 @@ func unshiftedCodepoint(rlKey int32) uint32 {
 	}
 
 	switch rlKey {
+	case rl.KeyTab:
+		return 0x09
+	case rl.KeyEnter:
+		return 0x0D
+	case rl.KeyBackspace:
+		return 0x08
+	case rl.KeyEscape:
+		return 0x1B
 	case rl.KeySpace:
 		return ' '
 	case rl.KeyMinus:
@@ -128,6 +136,21 @@ func unshiftedCodepoint(rlKey int32) uint32 {
 		return '/'
 	case rl.KeyGrave:
 		return '`'
+	default:
+		return 0
+	}
+}
+
+func controlCharUtf8(rlKey int32) byte {
+	switch rlKey {
+	case rl.KeyTab:
+		return 0x09
+	case rl.KeyEnter:
+		return 0x0D
+	case rl.KeyBackspace:
+		return 0x7F
+	case rl.KeyEscape:
+		return 0x1B
 	default:
 		return 0
 	}

@@ -10,8 +10,42 @@ import (
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
-//go:embed fonts/JetBrainsMono-Regular.ttf
+//go:embed fonts/JetBrainsMonoNerdFont-Regular.ttf
 var fontFS embed.FS
+
+func fontCodepoints() []rune {
+	ranges := [][2]rune{
+		{0x0020, 0x007E}, // ASCII
+		{0x00A0, 0x00FF}, // Latin-1 Supplement
+		{0x0100, 0x017F}, // Latin Extended-A
+		{0x2000, 0x206F}, // General Punctuation
+		{0x2190, 0x21FF}, // Arrows
+		{0x2200, 0x22FF}, // Mathematical Operators
+		{0x2300, 0x23FF}, // Miscellaneous Technical
+		{0x2500, 0x257F}, // Box Drawing
+		{0x2580, 0x259F}, // Block Elements
+		{0x25A0, 0x25FF}, // Geometric Shapes
+		{0x2600, 0x26FF}, // Miscellaneous Symbols
+		{0x2700, 0x27BF}, // Dingbats
+		{0x2800, 0x28FF}, // Braille Patterns
+		{0xE000, 0xE0FF}, // Private Use Area (Powerline/Nerd)
+		{0xE200, 0xE2FF}, // Nerd Fonts - Seti-UI + Custom
+		{0xE700, 0xE7FF}, // Nerd Fonts - Devicons
+		{0xF000, 0xF2FF}, // Nerd Fonts - Font Awesome
+		{0xF300, 0xF3FF}, // Nerd Fonts - Font Awesome Extension
+		{0xF400, 0xF4FF}, // Nerd Fonts - Octicons
+		{0xF500, 0xF5FF}, // Nerd Fonts - Font Logos
+		{0xF600, 0xF6FF}, // Nerd Fonts - Codicons
+		{0xFFFD, 0xFFFD}, // Replacement character
+	}
+	var cp []rune
+	for _, r := range ranges {
+		for c := r[0]; c <= r[1]; c++ {
+			cp = append(cp, c)
+		}
+	}
+	return cp
+}
 
 func main() {
 	runtime.LockOSThread()
@@ -23,7 +57,7 @@ func main() {
 	defer rl.CloseWindow()
 
 	// Load embedded font at native DPI
-	fontData, err := fontFS.ReadFile("fonts/JetBrainsMono-Regular.ttf")
+	fontData, err := fontFS.ReadFile("fonts/JetBrainsMonoNerdFont-Regular.ttf")
 	if err != nil {
 		panic("failed to load embedded font: " + err.Error())
 	}
@@ -32,7 +66,7 @@ func main() {
 	fontSize := int32(16)
 	fontSizePx := int32(float32(fontSize) * dpiScale.Y)
 	fontLoadSize := fontSizePx * 3 // Load at 3x for crisp zoom
-	font := rl.LoadFontFromMemory(".ttf", fontData, fontLoadSize, nil)
+	font := rl.LoadFontFromMemory(".ttf", fontData, fontLoadSize, fontCodepoints())
 	rl.SetTextureFilter(font.Texture, rl.FilterBilinear)
 	defer rl.UnloadFont(font)
 

@@ -85,9 +85,9 @@ func main() {
 	c := canvas.NewCanvas()
 	defer c.FreeAll()
 
-	// Set up the node creation function for right-click
+	// Set up the node creation function
 	canvas.CreateNodeFunc = func(pos rl.Vector2) canvas.Node {
-		tn, err := terminal.NewTerminalNode(pos, 80, 24, font, int(fontSizePx), cellW, cellH, "")
+		tn, err := terminal.NewTerminalNode(pos, 80, 24, font, int(fontSizePx), cellW, cellH, "", canvas.SandboxMode)
 		if err != nil {
 			rl.TraceLog(rl.LogError, "Failed to create terminal: %s", err.Error())
 			return nil
@@ -97,7 +97,7 @@ func main() {
 
 	// Create initial terminal
 	term, err := terminal.NewTerminalNode(
-		rl.Vector2{X: 50, Y: 50}, 80, 24, font, int(fontSizePx), cellW, cellH, "")
+		rl.Vector2{X: 50, Y: 50}, 80, 24, font, int(fontSizePx), cellW, cellH, "", false)
 	if err != nil {
 		panic("failed to create terminal: " + err.Error())
 	}

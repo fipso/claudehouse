@@ -21,6 +21,9 @@ var lastEscapeTime time.Time
 var lastClickTime time.Time
 var lastClickPos rl.Vector2
 
+// SandboxMode controls whether new terminals are created inside a gVisor sandbox.
+var SandboxMode bool
+
 // CreateNodeFunc is set by main to create new terminal nodes.
 var CreateNodeFunc func(pos rl.Vector2) Node
 
@@ -189,6 +192,9 @@ func (c *Canvas) handleFocusedInput(mousePos, mouseWorld rl.Vector2) {
 		case rl.IsKeyPressed(rl.KeyQ):
 			c.RemoveNode(c.FocusedIdx)
 			return
+		case rl.IsKeyPressed(rl.KeyS):
+			SandboxMode = !SandboxMode
+			return
 		case rl.IsKeyPressed(rl.KeyE):
 			c.zoomToFit(node)
 			return
@@ -283,6 +289,9 @@ func (c *Canvas) handleCanvasInput(mousePos, mouseWorld rl.Vector2) {
 			c.zoomStep(1, mousePos)
 		case rl.IsKeyPressed(rl.KeyMinus):
 			c.zoomStep(-1, mousePos)
+		case rl.IsKeyPressed(rl.KeyS):
+			SandboxMode = !SandboxMode
+			return
 		}
 	}
 

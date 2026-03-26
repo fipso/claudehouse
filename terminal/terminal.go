@@ -48,9 +48,10 @@ type TerminalNode struct {
 	animDone bool
 
 	scrollAccum float32
+	sandboxed   bool
 }
 
-func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, cellW, cellH int, shell string) (*TerminalNode, error) {
+func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, cellW, cellH int, shell string, sandboxed bool) (*TerminalNode, error) {
 	term, err := ghostty.NewTerminal(cols, rows, 1000)
 	if err != nil {
 		return nil, err
@@ -119,7 +120,12 @@ func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, 
 		return nil, err
 	}
 
-	p, err := SpawnPTY(shell, cols, rows, cellW, cellH)
+	var p *PTY
+	if sandboxed {
+		p, err = SpawnSandboxedPTY(shell, cols, rows, cellW, cellH)
+	} else {
+		p, err = SpawnPTY(shell, cols, rows, cellW, cellH)
+	}
 	if err != nil {
 		mouseEvt.Free()
 		me.Free()
@@ -151,6 +157,7 @@ func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, 
 		cellH:        cellH,
 		fontSize:     fontSize,
 		font:         font,
+		sandboxed:    sandboxed,
 	}, nil
 }
 
@@ -263,10 +270,13 @@ func (tn *TerminalNode) Draw(camera rl.Camera2D) {
 	rl.DrawRectangle(int32(drawX), int32(drawY), int32(width), int32(height),
 		rl.Color{R: bg.R, G: bg.G, B: bg.B, A: alpha})
 
-	// Draw border if focused
+	// Draw border if focused (orange for sandboxed, blue for normal)
 	if tn.focused {
-		rl.DrawRectangleLines(int32(drawX)-1, int32(drawY)-1, int32(width)+2, int32(height)+2,
-			rl.Color{R: 100, G: 150, B: 255, A: alpha})
+		borderColor := rl.Color{R: 100, G: 150, B: 255, A: alpha}
+		if tn.sandboxed {
+			borderColor = rl.Color{R: 255, G: 160, B: 40, A: alpha}
+		}
+		rl.DrawRectangleLines(int32(drawX)-1, int32(drawY)-1, int32(width)+2, int32(height)+2, borderColor)
 	}
 
 	DrawTerminal(tn.renderState, tn.rowIter, tn.rowCells, tn.font,
@@ -535,6 +545,10 @@ func (tn *TerminalNode) Contains(worldPoint rl.Vector2) bool {
 	size := tn.Size()
 	return worldPoint.X >= tn.Pos.X && worldPoint.X <= tn.Pos.X+size.X &&
 		worldPoint.Y >= tn.Pos.Y && worldPoint.Y <= tn.Pos.Y+size.Y
+}
+
+func (tn *TerminalNode) Sandboxed() bool {
+	return tn.sandboxed
 }
 
 func (tn *TerminalNode) Focused() bool {

@@ -255,6 +255,12 @@ func (c *Canvas) drawHUD() {
 	rl.DrawText(zoomText, 10, screenH-25, 16,
 		rl.Color{R: 150, G: 150, B: 150, A: 200})
 
+	// Sandbox mode indicator
+	if SandboxMode {
+		rl.DrawText("SANDBOX", 10, 10, 16,
+			rl.Color{R: 255, G: 160, B: 40, A: 230})
+	}
+
 	// Keybind bar
 	var hints string
 	if c.FocusedIdx >= 0 && c.FocusedIdx < len(c.Nodes) {

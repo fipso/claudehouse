@@ -188,6 +188,15 @@ func (tn *TerminalNode) Update() {
 		}
 	}
 
+	// Check if shell process exited
+	if !tn.closing {
+		select {
+		case <-tn.pty.Done():
+			tn.StartCloseAnim()
+		default:
+		}
+	}
+
 	// Drain PTY output into terminal
 	for {
 		select {

@@ -202,12 +202,17 @@ func (c *Canvas) handleFocusedInput(mousePos, mouseWorld rl.Vector2) {
 			c.zoomStep(-1, mousePos)
 			return
 		case rl.IsKeyPressed(rl.KeyEnter):
+			// Snap any in-progress node animation so position is final
+			if c.nodeAnimIdx >= 0 && c.nodeAnimIdx < len(c.Nodes) {
+				c.Nodes[c.nodeAnimIdx].SetPosition(c.nodeAnimTarget)
+				c.nodeAnimIdx = -1
+			}
 			pos := node.Position()
 			size := node.Size()
 			cellW, cellH := node.CellSize()
 			cols := uint16((int(size.X) - 2*terminalPad) / cellW)
 			rows := uint16((int(size.Y) - 2*terminalPad) / cellH)
-			newPos := snapToGrid(rl.Vector2{X: pos.X + size.X + gridSize, Y: pos.Y})
+			newPos := rl.Vector2{X: snapToGrid(rl.Vector2{X: pos.X + size.X + gridSize}).X, Y: pos.Y}
 			if !c.wouldOverlap(newPos, size) && CreateNodeFunc != nil {
 				newNode := CreateNodeFunc(newPos)
 				if newNode != nil {

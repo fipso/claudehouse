@@ -3,6 +3,9 @@ package terminal
 import (
 	"claudehouse/ghostty"
 	"math"
+	"os/exec"
+	"strings"
+	"time"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
@@ -49,6 +52,15 @@ type TerminalNode struct {
 
 	scrollAccum float32
 	sandboxed   bool
+
+	// Text selection state
+	selecting    bool
+	selHasRange  bool
+	selStartCol  int
+	selStartRow  int
+	selEndCol    int
+	selEndRow    int
+	selCopyTimer float64 // debounce timer for clipboard copy
 }
 
 func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, cellW, cellH int, shell string, sandboxed bool) (*TerminalNode, error) {
@@ -279,8 +291,14 @@ func (tn *TerminalNode) Draw(camera rl.Camera2D) {
 		rl.DrawRectangleLines(int32(drawX)-1, int32(drawY)-1, int32(width)+2, int32(height)+2, borderColor)
 	}
 
+	sc, sr, ec, er, selActive := tn.Selection()
+	sel := SelectionRange{
+		StartCol: sc, StartRow: sr,
+		EndCol: ec, EndRow: er,
+		Active: selActive,
+	}
 	DrawTerminal(tn.renderState, tn.rowIter, tn.rowCells, tn.font,
-		tn.cellW, tn.cellH, tn.fontSize, padX, padY, alpha)
+		tn.cellW, tn.cellH, tn.fontSize, padX, padY, alpha, sel)
 }
 
 func (tn *TerminalNode) Closing() bool {
@@ -417,10 +435,93 @@ func (tn *TerminalNode) HandleKeyInput() {
 	}
 }
 
+// mouseToCellPos converts world-space mouse coordinates to terminal cell col/row.
+func (tn *TerminalNode) mouseToCellPos(mouseWorld rl.Vector2) (col, row int) {
+	localX := mouseWorld.X - tn.Pos.X - float32(Pad)
+	localY := mouseWorld.Y - tn.Pos.Y - float32(Pad)
+	col = int(localX) / tn.cellW
+	row = int(localY) / tn.cellH
+	if col < 0 {
+		col = 0
+	}
+	if col >= int(tn.cols) {
+		col = int(tn.cols) - 1
+	}
+	if row < 0 {
+		row = 0
+	}
+	if row >= int(tn.rows) {
+		row = int(tn.rows) - 1
+	}
+	return
+}
+
+// Selection returns the current selection range, normalized so start <= end.
+func (tn *TerminalNode) Selection() (startCol, startRow, endCol, endRow int, active bool) {
+	if !tn.selHasRange {
+		return 0, 0, 0, 0, false
+	}
+	sr, sc := tn.selStartRow, tn.selStartCol
+	er, ec := tn.selEndRow, tn.selEndCol
+	// Normalize: start before end
+	if sr > er || (sr == er && sc > ec) {
+		sr, sc, er, ec = er, ec, sr, sc
+	}
+	return sc, sr, ec, er, true
+}
+
+// ClearSelection clears the current text selection.
+func (tn *TerminalNode) ClearSelection() {
+	tn.selecting = false
+	tn.selHasRange = false
+}
+
+const copyDebounce = 150 * time.Millisecond
+
 func (tn *TerminalNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vector2) {
 	if tn.closing {
 		return
 	}
+
+	mouseTracking := tn.terminal.GetMouseTracking()
+
+	// --- Text selection (only when terminal is NOT tracking mouse) ---
+	if !mouseTracking {
+		if rl.IsMouseButtonPressed(rl.MouseButtonLeft) {
+			col, row := tn.mouseToCellPos(mouseWorld)
+			tn.selecting = true
+			tn.selStartCol = col
+			tn.selStartRow = row
+			tn.selEndCol = col
+			tn.selEndRow = row
+			tn.selHasRange = false
+			tn.selCopyTimer = 0
+		}
+		if tn.selecting && rl.IsMouseButtonDown(rl.MouseButtonLeft) {
+			col, row := tn.mouseToCellPos(mouseWorld)
+			if col != tn.selEndCol || row != tn.selEndRow {
+				tn.selEndCol = col
+				tn.selEndRow = row
+				tn.selHasRange = true
+			}
+		}
+		if tn.selecting && rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
+			tn.selecting = false
+			if tn.selHasRange {
+				tn.selCopyTimer = float64(rl.GetTime())
+			}
+		}
+		// Debounced copy to clipboard
+		if tn.selCopyTimer > 0 && float64(rl.GetTime())-tn.selCopyTimer >= copyDebounce.Seconds() {
+			tn.selCopyTimer = 0
+			go tn.copySelectionToClipboard()
+		}
+	} else {
+		// Clear selection when entering mouse tracking mode
+		tn.ClearSelection()
+	}
+
+	// --- Forward mouse events to terminal ---
 	tn.mouseEncoder.SetOptFromTerminal(tn.terminal)
 
 	// Set encoder size relative to the terminal node's position
@@ -442,13 +543,16 @@ func (tn *TerminalNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vecto
 	tn.mouseEvent.SetMods(mods)
 	tn.mouseEvent.SetPosition(localX, localY)
 
-	// Check buttons
+	// Check buttons — skip left button when not in mouse tracking mode (used for selection)
 	buttons := []rl.MouseButton{
 		rl.MouseButtonLeft, rl.MouseButtonRight, rl.MouseButtonMiddle,
 		rl.MouseButtonSide, rl.MouseButtonExtra, rl.MouseButtonForward,
 		rl.MouseButtonBack,
 	}
 	for _, rlBtn := range buttons {
+		if rlBtn == rl.MouseButtonLeft && !mouseTracking {
+			continue // left button is used for text selection
+		}
 		gbtn := raylibMouseToGhostty(rlBtn)
 		if gbtn == ghostty.MouseButtonUnknown {
 			continue
@@ -464,11 +568,11 @@ func (tn *TerminalNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vecto
 		}
 	}
 
-	// Motion
+	// Motion — skip left-button motion when not in mouse tracking mode
 	delta := rl.GetMouseDelta()
 	if delta.X != 0 || delta.Y != 0 {
 		tn.mouseEvent.SetAction(ghostty.MouseActionMotion)
-		if rl.IsMouseButtonDown(rl.MouseButtonLeft) {
+		if rl.IsMouseButtonDown(rl.MouseButtonLeft) && mouseTracking {
 			tn.mouseEvent.SetButton(ghostty.MouseButtonLeft)
 		} else if rl.IsMouseButtonDown(rl.MouseButtonRight) {
 			tn.mouseEvent.SetButton(ghostty.MouseButtonRight)
@@ -477,13 +581,15 @@ func (tn *TerminalNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vecto
 		} else {
 			tn.mouseEvent.ClearButton()
 		}
-		tn.mouseEncodeAndWrite()
+		if mouseTracking || !rl.IsMouseButtonDown(rl.MouseButtonLeft) {
+			tn.mouseEncodeAndWrite()
+		}
 	}
 
 	// Scroll wheel
 	wheel := rl.GetMouseWheelMove()
 	if wheel != 0 {
-		if tn.terminal.GetMouseTracking() {
+		if mouseTracking {
 			var scrollBtn ghostty.MouseButton
 			if wheel > 0 {
 				scrollBtn = ghostty.MouseButtonFour
@@ -499,6 +605,103 @@ func (tn *TerminalNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vecto
 			tn.scrollAccum += wheel * -5.0
 		}
 	}
+}
+
+// copySelectionToClipboard extracts the selected text and copies it via wl-copy.
+func (tn *TerminalNode) copySelectionToClipboard() {
+	sc, sr, ec, er, ok := tn.Selection()
+	if !ok {
+		return
+	}
+
+	// We need to read cells from the render state, which must be done
+	// with an up-to-date render state. Create temporary iterators.
+	rs, err := ghostty.NewRenderState()
+	if err != nil {
+		return
+	}
+	defer rs.Free()
+
+	ri, err := ghostty.NewRowIterator()
+	if err != nil {
+		return
+	}
+	defer ri.Free()
+
+	rc, err := ghostty.NewRowCells()
+	if err != nil {
+		return
+	}
+	defer rc.Free()
+
+	rs.Update(tn.terminal)
+	if !ri.Init(rs) {
+		return
+	}
+
+	var lines []string
+	row := 0
+	var cpBuf [16]uint32
+	var textBuf [64]byte
+
+	for ri.Next() {
+		if row < sr {
+			row++
+			continue
+		}
+		if row > er {
+			break
+		}
+
+		if !ri.GetCells(rc) {
+			row++
+			continue
+		}
+
+		startC := 0
+		endC := int(tn.cols) - 1
+		if row == sr {
+			startC = sc
+		}
+		if row == er {
+			endC = ec
+		}
+
+		var line strings.Builder
+		for col := startC; col <= endC; col++ {
+			if !rc.Select(uint16(col)) {
+				line.WriteByte(' ')
+				continue
+			}
+			graphemeLen := rc.GraphemeLen()
+			if graphemeLen == 0 {
+				line.WriteByte(' ')
+				continue
+			}
+			length := int(graphemeLen)
+			if length > 16 {
+				length = 16
+			}
+			rc.Graphemes(cpBuf[:length])
+			pos := 0
+			for i := 0; i < length && pos < 60; i++ {
+				n := utf8Encode(cpBuf[i], textBuf[pos:])
+				pos += n
+			}
+			line.Write(textBuf[:pos])
+		}
+		lines = append(lines, strings.TrimRight(line.String(), " "))
+		row++
+	}
+
+	text := strings.Join(lines, "\n")
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return
+	}
+
+	cmd := exec.Command("wl-copy", text)
+	cmd.Run()
 }
 
 func (tn *TerminalNode) mouseEncodeAndWrite() {

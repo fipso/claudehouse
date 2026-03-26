@@ -35,8 +35,31 @@ func utf8Encode(cp uint32, buf []byte) int {
 	}
 }
 
+// SelectionRange holds a normalized text selection for rendering highlights.
+type SelectionRange struct {
+	StartCol, StartRow, EndCol, EndRow int
+	Active                             bool
+}
+
+// cellInSelection returns true if the cell at (col, row) falls within the selection.
+func cellInSelection(col, row int, sel SelectionRange) bool {
+	if row < sel.StartRow || row > sel.EndRow {
+		return false
+	}
+	if row == sel.StartRow && row == sel.EndRow {
+		return col >= sel.StartCol && col <= sel.EndCol
+	}
+	if row == sel.StartRow {
+		return col >= sel.StartCol
+	}
+	if row == sel.EndRow {
+		return col <= sel.EndCol
+	}
+	return true // middle row, fully selected
+}
+
 func DrawTerminal(rs *ghostty.RenderState, ri *ghostty.RowIterator, rc *ghostty.RowCells,
-	font rl.Font, cellW, cellH, fontSize, padX, padY int, alpha uint8) {
+	font rl.Font, cellW, cellH, fontSize, padX, padY int, alpha uint8, sel SelectionRange) {
 
 	colors := rs.GetColors()
 	defaultFg := colors.Foreground
@@ -47,16 +70,19 @@ func DrawTerminal(rs *ghostty.RenderState, ri *ghostty.RowIterator, rc *ghostty.
 	}
 
 	y := padY
+	row := 0
 
 	var cpBuf [16]uint32
 	var textBuf [64]byte
 
 	for ri.Next() {
 		if !ri.GetCells(rc) {
+			row++
 			continue
 		}
 
 		x := padX
+		col := 0
 
 		for rc.Next() {
 			graphemeLen := rc.GraphemeLen()
@@ -67,6 +93,11 @@ func DrawTerminal(rs *ghostty.RenderState, ri *ghostty.RowIterator, rc *ghostty.
 					rl.DrawRectangle(int32(x), int32(y), int32(cellW), int32(cellH),
 						rl.Color{R: bg.R, G: bg.G, B: bg.B, A: alpha})
 				}
+				if sel.Active && cellInSelection(col, row, sel) {
+					rl.DrawRectangle(int32(x), int32(y), int32(cellW), int32(cellH),
+						rl.Color{R: 100, G: 150, B: 255, A: 80})
+				}
+				col++
 				x += cellW
 				continue
 			}
@@ -131,10 +162,18 @@ func DrawTerminal(rs *ghostty.RenderState, ri *ghostty.RowIterator, rc *ghostty.
 					float32(fontSize), 0, rayFg)
 			}
 
+			// Selection highlight
+			if sel.Active && cellInSelection(col, row, sel) {
+				rl.DrawRectangle(int32(x), int32(y), int32(cellW), int32(cellH),
+					rl.Color{R: 100, G: 150, B: 255, A: 80})
+			}
+
+			col++
 			x += cellW
 		}
 
 		ri.SetClean()
+		row++
 		y += cellH
 	}
 

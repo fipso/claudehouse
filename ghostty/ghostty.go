@@ -692,6 +692,11 @@ func (rc *RowCells) BgColor() (ColorRGB, bool) {
 	return ColorRGB{}, false
 }
 
+func (rc *RowCells) Select(col uint16) bool {
+	res := C.ghostty_render_state_row_cells_select(rc.cells, C.uint16_t(col))
+	return res == C.GHOSTTY_SUCCESS
+}
+
 func (rc *RowCells) GetStyle() Style {
 	style := C.init_style()
 	C.ghostty_render_state_row_cells_get(rc.cells,

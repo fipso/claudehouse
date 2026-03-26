@@ -6,6 +6,30 @@ Built with [Raylib](https://www.raylib.com/) + [Ghostty](https://ghostty.org/) t
 
 <img src="example.png" alt="usage example" height="400">
 
+## Building & Running
+
+### Prerequisites (Arch Linux)
+
+```sh
+sudo pacman -S go zig git curl make \
+  wayland wayland-protocols libxkbcommon \
+  libx11 libxcursor libxrandr libxrender libxinerama libxi libxext libxfixes xorgproto \
+  mesa
+```
+
+### Build & Run
+
+```sh
+# Build and run in one step
+make run
+
+# Or build separately
+make            # produces ./claudehouse binary
+LD_LIBRARY_PATH=vendor/ghostty/zig-out/lib ./claudehouse
+```
+
+The first build will clone Ghostty, compile `libghostty-vt` with Zig, and download JetBrains Mono — this takes a while. Subsequent builds are incremental.
+
 ## Sandbox
 
 Terminals can optionally run inside a [gVisor](https://gvisor.dev/) sandbox for syscall-level isolation. Toggle sandbox mode with `Alt+S` — new terminals will be created inside a gVisor container with:

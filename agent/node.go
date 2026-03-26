@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 
@@ -32,9 +33,13 @@ type ContentBlock struct {
 type AgentNode struct {
 	mu sync.Mutex
 
-	StreamID   string
-	TerminalID string
-	IsSubagent bool
+	StreamID       string
+	TerminalID     string
+	IsSubagent     bool
+	ParentStreamID string
+	Number         int    // sequential agent number within terminal
+	ParentLabel    string // e.g. "#1" if parent is agent #1
+	Model          string // model name from stream_start
 
 	Pos      rl.Vector2
 	font     rl.Font
@@ -148,6 +153,9 @@ func (n *AgentNode) handleEvent(evt proxy.AgentEvent) {
 			b.Complete = true
 		}
 
+	case "model":
+		n.Model = evt.Content
+
 	case "stream_end":
 		n.done = true
 		n.doneTime = float64(rl.GetTime())
@@ -202,9 +210,12 @@ func (n *AgentNode) Draw(camera rl.Camera2D) {
 	}
 
 	// Header line
-	headerText := "Agent"
-	if n.IsSubagent {
-		headerText = "Subagent"
+	headerText := fmt.Sprintf("Agent #%d", n.Number)
+	if n.ParentLabel != "" {
+		headerText = fmt.Sprintf("Agent #%d (parent: %s)", n.Number, n.ParentLabel)
+	}
+	if n.Model != "" {
+		headerText += " " + n.Model
 	}
 	if n.done {
 		headerText += " (done)"

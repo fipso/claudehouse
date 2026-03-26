@@ -25,22 +25,14 @@ func HostIP() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("ip route get: %w", err)
 	}
-	// Parse "1.1.1.1 via X.X.X.X dev Y src Z.Z.Z.Z"
-	for _, field := range strings.Fields(string(out)) {
-		if field == "src" {
-			continue
+	// Output: "1.1.1.1 via X.X.X.X dev Y src Z.Z.Z.Z uid N"
+	fields := strings.Fields(string(out))
+	for i, f := range fields {
+		if f == "src" && i+1 < len(fields) {
+			return fields[i+1], nil
 		}
-		// Find the token after "src"
-		idx := strings.Index(string(out), "src ")
-		if idx >= 0 {
-			rest := strings.Fields(string(out)[idx+4:])
-			if len(rest) > 0 {
-				return rest[0], nil
-			}
-		}
-		break
 	}
-	return "", fmt.Errorf("could not parse host IP from: %s", string(out))
+	return "", fmt.Errorf("no src in: %s", string(out))
 }
 
 func StartPasta(bundleDir string, proxyAllowHost string, proxyAllowPort int) (*PastaNetns, error) {

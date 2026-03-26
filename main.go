@@ -168,6 +168,9 @@ func main() {
 	// Track agent nodes: by stream ID for event routing, by terminal ID for layout.
 	agentByStream := map[string]*agent.AgentNode{}
 	agentsByTerminal := map[string][]*agent.AgentNode{}
+	// Parent-child inference: when a stream uses the Agent tool, the next new stream is its child.
+	pendingParent := map[string]string{} // terminalID → streamID of stream that called Agent tool
+	agentCounter := map[string]int{}     // terminalID → next agent number
 
 	// findTerminalNode finds the terminal node matching a terminal ID.
 	// Terminal IDs are "term-N" and terminals are created in order.
@@ -204,7 +207,6 @@ func main() {
 						// Find parent terminal position and size.
 						parentPos, parentSize, found := findTerminalNode(evt.TerminalID)
 						if !found {
-							// Fallback: use first node
 							if len(c.Nodes) > 0 {
 								parentPos = c.Nodes[0].Position()
 								parentSize = c.Nodes[0].Size()
@@ -228,11 +230,37 @@ func main() {
 							Y: parentPos.Y + parentSize.Y + gap,
 						}
 
+						// Assign sequential number.
+						agentCounter[evt.TerminalID]++
+						num := agentCounter[evt.TerminalID]
+
 						an := agent.NewAgentNode(agentPos, font, int(fontSizePx), cellW, cellH,
 							evt.StreamID, evt.TerminalID, evt.IsSubagent)
+						an.Number = num
+						an.Model = evt.Content // stream_start content is the model name
+
+						// Check if there's a pending parent (a stream that called the Agent tool).
+						if parentStreamID, ok := pendingParent[evt.TerminalID]; ok {
+							an.ParentStreamID = parentStreamID
+							if parentNode, ok := agentByStream[parentStreamID]; ok {
+								an.ParentLabel = fmt.Sprintf("#%d", parentNode.Number)
+							}
+							delete(pendingParent, evt.TerminalID)
+						}
+
 						agentByStream[evt.StreamID] = an
 						agentsByTerminal[evt.TerminalID] = append(agentsByTerminal[evt.TerminalID], an)
 						c.AddNode(an)
+
+					case "tool_start":
+						// When a stream calls the Agent tool, mark it as pending parent.
+						if evt.ToolName == "Agent" {
+							pendingParent[evt.TerminalID] = evt.StreamID
+						}
+						if an, ok := agentByStream[evt.StreamID]; ok {
+							an.Events() <- evt
+						}
+
 					default:
 						if an, ok := agentByStream[evt.StreamID]; ok {
 							an.Events() <- evt

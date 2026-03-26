@@ -9,12 +9,13 @@ import (
 
 // AgentEvent represents a parsed event from a Claude API stream.
 type AgentEvent struct {
-	StreamID   string
-	TerminalID string
-	IsSubagent bool
-	Type       string // "stream_start", "thinking", "text", "tool_start", "tool_delta", "tool_end", "stream_end"
-	Content    string
-	ToolName   string
+	StreamID       string
+	TerminalID     string
+	IsSubagent     bool
+	ParentStreamID string // set by main.go when parent is inferred
+	Type           string // "stream_start", "thinking", "text", "tool_start", "tool_delta", "tool_end", "stream_end"
+	Content        string
+	ToolName       string
 }
 
 // StreamRegistry tracks active API streams per terminal.

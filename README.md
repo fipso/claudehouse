@@ -4,7 +4,7 @@ An infinite canvas terminal multiplexer. Spawn, arrange, and resize terminal win
 
 Built with [Raylib](https://www.raylib.com/) + [Ghostty](https://ghostty.org/) terminal emulation.
 
-![usage example](demo.gif)
+<img src="example.png" alt="usage example" height="400">
 
 ## Sandbox
 

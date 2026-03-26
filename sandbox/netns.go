@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -65,12 +66,75 @@ func StartPasta(bundleDir string) (*PastaNetns, error) {
 		return nil, fmt.Errorf("timeout waiting for pasta setup")
 	}
 
+	// Step 3: Block access to private/LAN IP ranges inside the namespace.
+	// pasta provides full NAT by default — without these rules, the sandbox
+	// can reach devices on the local network.
+	if err := blockLANAccess(userNsPath, nsPath); err != nil {
+		sleepCmd.Process.Kill()
+		sleepCmd.Wait()
+		return nil, fmt.Errorf("block LAN access: %w", err)
+	}
+
 	return &PastaNetns{
-		PastaCmd: pastaCmd,
+		PastaCmd:   pastaCmd,
 		SleepCmd:   sleepCmd,
 		NsPath:     nsPath,
 		UserNsPath: userNsPath,
 	}, nil
+}
+
+// blockLANAccess adds iptables/ip6tables rules inside the network namespace
+// to reject all traffic to private (RFC 1918), link-local, and loopback ranges.
+func blockLANAccess(userNsPath, nsPath string) error {
+	// IPv4 private and special ranges
+	ipv4Ranges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"169.254.0.0/16",
+		"127.0.0.0/8",
+	}
+
+	// IPv6 private and link-local ranges
+	ipv6Ranges := []string{
+		"fc00::/7",
+		"fe80::/10",
+		"::1/128",
+	}
+
+	var errs []string
+
+	for _, cidr := range ipv4Ranges {
+		cmd := exec.Command("nsenter",
+			"--user="+userNsPath,
+			"--net="+nsPath,
+			"--preserve-credentials",
+			"--",
+			"iptables", "-A", "OUTPUT", "-d", cidr, "-j", "REJECT",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			errs = append(errs, fmt.Sprintf("iptables block %s: %v (%s)", cidr, err, string(out)))
+		}
+	}
+
+	for _, cidr := range ipv6Ranges {
+		cmd := exec.Command("nsenter",
+			"--user="+userNsPath,
+			"--net="+nsPath,
+			"--preserve-credentials",
+			"--",
+			"ip6tables", "-A", "OUTPUT", "-d", cidr, "-j", "REJECT",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			errs = append(errs, fmt.Sprintf("ip6tables block %s: %v (%s)", cidr, err, string(out)))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to add firewall rules:\n%s", strings.Join(errs, "\n"))
+	}
+
+	return nil
 }
 
 // Stop kills the processes and cleans up the namespace.

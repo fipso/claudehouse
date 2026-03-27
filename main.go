@@ -10,7 +10,9 @@ import (
 
 	"claudehouse/agent"
 	"claudehouse/canvas"
+	"claudehouse/config"
 	"claudehouse/proxy"
+	"claudehouse/sandbox"
 	"claudehouse/terminal"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
@@ -62,10 +64,35 @@ func main() {
 	rl.SetExitKey(0) // Don't close on Escape
 	defer rl.CloseWindow()
 
-	// Load embedded font at native DPI
-	fontData, err := fontFS.ReadFile("fonts/JetBrainsMonoNerdFont-Regular.ttf")
+	// Load configuration
+	homeDir, _ := os.UserHomeDir()
+	configDir := filepath.Join(homeDir, ".config", "claudehouse")
+	cfg, err := config.Load(configDir)
 	if err != nil {
-		panic("failed to load embedded font: " + err.Error())
+		log.Printf("WARNING: failed to load config: %v", err)
+		cfg = config.DefaultConfig()
+	}
+
+	// Apply canvas config
+	canvas.GridSize = float32(cfg.GridSize)
+	canvas.SnapEnabled = cfg.SnapToGrid
+	canvas.ZoomToFitGap = cfg.ZoomToFitGap
+	canvas.FillViewportGap = cfg.FillViewportGap
+
+	// Load font — from config path or embedded default
+	var fontData []byte
+	if cfg.Font != "" {
+		fontData, err = os.ReadFile(cfg.Font)
+		if err != nil {
+			log.Printf("WARNING: failed to load font %q, using default: %v", cfg.Font, err)
+			fontData = nil
+		}
+	}
+	if fontData == nil {
+		fontData, err = fontFS.ReadFile("fonts/JetBrainsMonoNerdFont-Regular.ttf")
+		if err != nil {
+			panic("failed to load embedded font: " + err.Error())
+		}
 	}
 
 	dpiScale := rl.GetWindowScaleDPI()
@@ -88,8 +115,6 @@ func main() {
 	}
 
 	// Initialize MITM proxy for intercepting Claude Code API traffic
-	homeDir, _ := os.UserHomeDir()
-	configDir := filepath.Join(homeDir, ".config", "claudehouse")
 	mitmProxy, err := proxy.NewProxy(configDir)
 	if err != nil {
 		log.Printf("WARNING: failed to start MITM proxy: %v", err)
@@ -132,10 +157,17 @@ func main() {
 	c := canvas.NewCanvas()
 	defer c.FreeAll()
 
+	// Convert active sandbox profile mounts to sandbox.MountSpec.
+	sandboxProfile := cfg.ActiveSandboxProfile()
+	var extraMounts []sandbox.MountSpec
+	for _, m := range sandboxProfile.Mounts {
+		extraMounts = append(extraMounts, sandbox.MountSpec{Path: m.Path, Mode: m.Mode})
+	}
+
 	// Set up the node creation function
 	canvas.CreateNodeFunc = func(pos rl.Vector2) canvas.Node {
 		proxyEnv := makeProxyEnv(canvas.SandboxMode)
-		tn, err := terminal.NewTerminalNode(pos, 80, 24, font, int(fontSizePx), cellW, cellH, "", canvas.SandboxMode, proxyEnv)
+		tn, err := terminal.NewTerminalNode(pos, 80, 24, font, int(fontSizePx), cellW, cellH, "", canvas.SandboxMode, proxyEnv, sandboxProfile.AllowedLANRanges, sandboxProfile.ShouldMountHome(), extraMounts)
 		if err != nil {
 			rl.TraceLog(rl.LogError, "Failed to create terminal: %s", err.Error())
 			return nil
@@ -146,7 +178,7 @@ func main() {
 	// Create initial terminal
 	proxyEnv := makeProxyEnv(false)
 	term, err := terminal.NewTerminalNode(
-		rl.Vector2{X: 50, Y: 50}, 80, 24, font, int(fontSizePx), cellW, cellH, "", false, proxyEnv)
+		rl.Vector2{X: 50, Y: 50}, 80, 24, font, int(fontSizePx), cellW, cellH, "", false, proxyEnv, nil, true, nil)
 	if err != nil {
 		panic("failed to create terminal: " + err.Error())
 	}

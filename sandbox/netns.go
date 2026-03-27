@@ -21,7 +21,7 @@ type PastaNetns struct {
 // but no direct access to local IPs. Returns the netns path for nsenter.
 // The gateway IP inside the namespace is mapped to the host by pasta,
 // allowing the sandbox to reach the MITM proxy.
-func StartPasta(proxyAllowPort int) (*PastaNetns, error) {
+func StartPasta(proxyAllowPort int, allowedRanges []string) (*PastaNetns, error) {
 	// Step 1: Create a long-lived process in a new user+network namespace.
 	// --user --map-root-user: create user namespace (allows net namespace without root)
 	// --net: create network namespace
@@ -82,7 +82,7 @@ func StartPasta(proxyAllowPort int) (*PastaNetns, error) {
 	// pasta provides full NAT by default — without these rules, the sandbox
 	// can reach devices on the local network.
 	// The proxy is whitelisted via gwIP:proxyAllowPort before the REJECT rules.
-	if err := blockLANAccess(userNsPath, nsPath, gwIP, proxyAllowPort); err != nil {
+	if err := blockLANAccess(userNsPath, nsPath, gwIP, proxyAllowPort, allowedRanges); err != nil {
 		sleepCmd.Process.Kill()
 		sleepCmd.Wait()
 		return nil, fmt.Errorf("block LAN access: %w", err)
@@ -121,7 +121,7 @@ func namespaceGateway(userNsPath, nsPath string) (string, error) {
 
 // blockLANAccess adds iptables/ip6tables rules inside the network namespace
 // to reject all traffic to private (RFC 1918), link-local, and loopback ranges.
-func blockLANAccess(userNsPath, nsPath string, proxyAllowHost string, proxyAllowPort int) error {
+func blockLANAccess(userNsPath, nsPath string, proxyAllowHost string, proxyAllowPort int, allowedRanges []string) error {
 	// If a proxy is configured, allow traffic to it before blocking private ranges.
 	if proxyAllowHost != "" && proxyAllowPort > 0 {
 		cmd := exec.Command("nsenter",
@@ -136,6 +136,24 @@ func blockLANAccess(userNsPath, nsPath string, proxyAllowHost string, proxyAllow
 		)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("iptables allow proxy %s:%d: %v (%s)", proxyAllowHost, proxyAllowPort, err, string(out))
+		}
+	}
+
+	// Allow user-configured LAN ranges before blocking.
+	for _, cidr := range allowedRanges {
+		iptCmd := "iptables"
+		if strings.Contains(cidr, ":") {
+			iptCmd = "ip6tables"
+		}
+		cmd := exec.Command("nsenter",
+			"--user="+userNsPath,
+			"--net="+nsPath,
+			"--preserve-credentials",
+			"--",
+			iptCmd, "-A", "OUTPUT", "-d", cidr, "-j", "ACCEPT",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("%s allow %s: %v (%s)", iptCmd, cidr, err, string(out))
 		}
 	}
 

@@ -3,6 +3,7 @@ module claudehouse
 go 1.25.7
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/creack/pty v1.1.24
 	github.com/elazarl/goproxy v1.8.2
 	github.com/gen2brain/raylib-go/raylib v0.55.1

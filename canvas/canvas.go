@@ -231,8 +231,8 @@ func (c *Canvas) drawGrid() {
 		rl.Vector2{X: float32(rl.GetScreenWidth()), Y: float32(rl.GetScreenHeight())},
 		c.Camera)
 
-	startX := float32(int(topLeft.X/gridSize)) * gridSize
-	startY := float32(int(topLeft.Y/gridSize)) * gridSize
+	startX := float32(int(topLeft.X/GridSize)) * GridSize
+	startY := float32(int(topLeft.Y/GridSize)) * GridSize
 
 	dotColor := rl.Color{R: 60, G: 60, B: 60, A: 255}
 	dotSize := float32(2.0) / c.Camera.Zoom
@@ -240,8 +240,8 @@ func (c *Canvas) drawGrid() {
 		dotSize = 1
 	}
 
-	for x := startX; x < bottomRight.X; x += gridSize {
-		for y := startY; y < bottomRight.Y; y += gridSize {
+	for x := startX; x < bottomRight.X; x += GridSize {
+		for y := startY; y < bottomRight.Y; y += GridSize {
 			rl.DrawCircleV(rl.Vector2{X: x, Y: y}, float32(dotSize), dotColor)
 		}
 	}

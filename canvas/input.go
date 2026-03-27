@@ -7,13 +7,20 @@ import (
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
-const gridSize = float32(50)
+var GridSize float32 = 50
+var SnapEnabled bool = true
+var ZoomToFitGap int = 100
+var FillViewportGap int = 40
+
 const terminalPad = 4 // must match terminal.Pad
 
 func snapToGrid(v rl.Vector2) rl.Vector2 {
+	if !SnapEnabled {
+		return v
+	}
 	return rl.Vector2{
-		X: float32(math.Round(float64(v.X/gridSize))) * gridSize,
-		Y: float32(math.Round(float64(v.Y/gridSize))) * gridSize,
+		X: float32(math.Round(float64(v.X/GridSize))) * GridSize,
+		Y: float32(math.Round(float64(v.Y/GridSize))) * GridSize,
 	}
 }
 
@@ -218,7 +225,7 @@ func (c *Canvas) handleFocusedInput(mousePos, mouseWorld rl.Vector2) {
 			cellW, cellH := node.CellSize()
 			cols := uint16((int(size.X) - 2*terminalPad) / cellW)
 			rows := uint16((int(size.Y) - 2*terminalPad) / cellH)
-			newPos := rl.Vector2{X: snapToGrid(rl.Vector2{X: pos.X + size.X + gridSize}).X, Y: pos.Y}
+			newPos := rl.Vector2{X: snapToGrid(rl.Vector2{X: pos.X + size.X + GridSize}).X, Y: pos.Y}
 			if !c.wouldOverlap(newPos, size) && CreateNodeFunc != nil {
 				newNode := CreateNodeFunc(newPos)
 				if newNode != nil {
@@ -585,7 +592,7 @@ func (c *Canvas) zoomStep(dir int, mousePos rl.Vector2) {
 }
 
 func (c *Canvas) fillViewport(node Node) {
-	const gap = 40 // pixels of padding around the terminal
+	gap := float32(FillViewportGap)
 
 	screenW := float32(rl.GetScreenWidth())
 	screenH := float32(rl.GetScreenHeight())
@@ -622,10 +629,10 @@ func (c *Canvas) zoomToFit(node Node) {
 	screenW := float32(rl.GetScreenWidth())
 	screenH := float32(rl.GetScreenHeight())
 
-	// Compute zoom so the node fills ~80% of the screen
-	margin := float32(0.8)
-	zoomX := screenW * margin / size.X
-	zoomY := screenH * margin / size.Y
+	// Compute zoom so the node fits with the configured pixel gap on each side
+	gap := float32(ZoomToFitGap)
+	zoomX := (screenW - 2*gap) / size.X
+	zoomY := (screenH - 2*gap) / size.Y
 	zoom := zoomX
 	if zoomY < zoom {
 		zoom = zoomY

@@ -178,7 +178,7 @@ func recvFd(conn *net.UnixConn) (*os.File, error) {
 	return nil, fmt.Errorf("no fd received")
 }
 
-func SpawnSandboxedPTY(shell string, cols, rows uint16, cellW, cellH int, extraEnv []string) (*PTY, error) {
+func SpawnSandboxedPTY(shell string, cols, rows uint16, cellW, cellH int, extraEnv []string, allowedLANRanges []string, mountHome bool, extraMounts []sandbox.MountSpec) (*PTY, error) {
 	if shell == "" {
 		shell = defaultShell()
 	}
@@ -207,7 +207,7 @@ func SpawnSandboxedPTY(shell string, cols, rows uint16, cellW, cellH int, extraE
 			fmt.Sscanf(strings.TrimPrefix(e, "CLAUDEHOUSE_PROXY_PORT="), "%d", &proxyAllowPort)
 		}
 	}
-	pastaNetns, err := sandbox.StartPasta(proxyAllowPort)
+	pastaNetns, err := sandbox.StartPasta(proxyAllowPort, allowedLANRanges)
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("start pasta: %w", err)
@@ -226,7 +226,7 @@ func SpawnSandboxedPTY(shell string, cols, rows uint16, cellW, cellH int, extraE
 	}
 
 	// Generate OCI bundle (after pasta so env vars have the correct proxy host)
-	if err := sandbox.GenerateBundle(bundleDir, shell, extraEnv); err != nil {
+	if err := sandbox.GenerateBundle(bundleDir, shell, extraEnv, mountHome, extraMounts); err != nil {
 		pastaNetns.Stop()
 		cleanup()
 		return nil, fmt.Errorf("generate bundle: %w", err)

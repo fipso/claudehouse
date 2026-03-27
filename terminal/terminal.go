@@ -320,13 +320,7 @@ func (tn *TerminalNode) Draw(camera rl.Camera2D) {
 		if tn.sandboxed {
 			borderColor = rl.Color{R: 255, G: 160, B: 40, A: alpha}
 		}
-		thick := float32(1.0)
-		if camera.Zoom > 0 {
-			thick = 1.0 / camera.Zoom
-		}
-		rl.DrawRectangleLinesEx(
-			rl.Rectangle{X: drawX - thick, Y: drawY - thick, Width: float32(width) + 2*thick, Height: float32(height) + 2*thick},
-			thick, borderColor)
+		rl.DrawRectangleLines(int32(drawX)-1, int32(drawY)-1, width+2, height+2, borderColor)
 	}
 
 	// Pick mip level based on zoom: 4x, 2x, or 1x

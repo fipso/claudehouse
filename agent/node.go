@@ -312,13 +312,7 @@ func (n *AgentNode) Draw(camera rl.Camera2D) {
 	if n.done {
 		borderColor.A = alpha / 2
 	}
-	thick := float32(1.0)
-	if camera.Zoom > 0 {
-		thick = 1.0 / camera.Zoom
-	}
-	rl.DrawRectangleLinesEx(
-		rl.Rectangle{X: drawX, Y: drawY, Width: width, Height: h},
-		thick, borderColor)
+	rl.DrawRectangleLines(int32(drawX), int32(drawY), int32(width), int32(h), borderColor)
 }
 
 type renderedLine struct {

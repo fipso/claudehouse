@@ -181,6 +181,13 @@ func (c *Canvas) Draw() {
 		n.PreDraw()
 	}
 
+	// Restore DPI-scaled viewport after texture rendering
+	// (EndTextureMode resets it to Raylib's default)
+	dpi := rl.GetWindowScaleDPI()
+	rl.Viewport(0, 0,
+		int32(float32(rl.GetScreenWidth())*dpi.X),
+		int32(float32(rl.GetScreenHeight())*dpi.Y))
+
 	rl.BeginMode2D(c.Camera)
 
 	// Draw grid dots

@@ -176,6 +176,11 @@ func (c *Canvas) Update() {
 }
 
 func (c *Canvas) Draw() {
+	// Pre-draw pass: render node textures (must be outside BeginMode2D)
+	for _, n := range c.Nodes {
+		n.PreDraw()
+	}
+
 	rl.BeginMode2D(c.Camera)
 
 	// Draw grid dots

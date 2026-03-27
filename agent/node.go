@@ -5,20 +5,15 @@ import (
 	"strings"
 	"sync"
 
+	"claudehouse/canvas"
 	"claudehouse/proxy"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
 const (
-	NodePad    = 8
-	NodeCols   = 60
-	animNone   = 0
-	animSpawn  = 1
-	animClose  = 2
-
-	animSpawnDuration = 0.5
-	animCloseDuration = 0.25
+	NodePad  = 8
+	NodeCols = 60
 )
 
 // ContentBlock represents a block of content in the agent output.
@@ -31,6 +26,8 @@ type ContentBlock struct {
 
 // AgentNode displays structured Claude API output on the canvas.
 type AgentNode struct {
+	canvas.NodeBase
+
 	mu sync.Mutex
 
 	StreamID       string
@@ -41,24 +38,17 @@ type AgentNode struct {
 	ParentLabel    string // e.g. "#1" if parent is agent #1
 	Model          string // model name from stream_start
 
-	Pos      rl.Vector2
-	font     rl.Font
-	fontSize int
-	cellW    int
-	cellH    int
-
 	blocks []*ContentBlock
 
 	// Scroll
 	scrollOffset int
 	maxRows      int
 
-	// Animation
-	animType int
-	animTime float64
-	closing  bool
-	animDone bool
-	focused  bool
+	// RenderTexture caching
+	texture       rl.RenderTexture2D
+	texValid      bool
+	dirty         bool
+	contentHeight float32 // visible content height in world units (set by PreDraw)
 
 	// Event channel for receiving updates
 	events   chan proxy.AgentEvent
@@ -68,38 +58,37 @@ type AgentNode struct {
 
 // NewAgentNode creates an agent output node.
 func NewAgentNode(pos rl.Vector2, font rl.Font, fontSize, cellW, cellH int, streamID, terminalID string, isSubagent bool) *AgentNode {
+	maxRows := 30
+	s := int32(canvas.TexScale)
+	texW := int32(NodeCols*cellW+2*NodePad) * s
+	texH := int32(maxRows*cellH+2*NodePad) * s
+	tex := rl.LoadRenderTexture(texW, texH)
+	rl.SetTextureFilter(tex.Texture, rl.FilterBilinear)
+
 	return &AgentNode{
+		NodeBase: canvas.NodeBase{
+			Pos:      pos,
+			Font:     font,
+			FontSize: fontSize,
+			CellW:    cellW,
+			CellH:    cellH,
+		},
 		StreamID:   streamID,
 		TerminalID: terminalID,
 		IsSubagent: isSubagent,
-		Pos:        pos,
-		font:       font,
-		fontSize:   fontSize,
-		cellW:      cellW,
-		cellH:      cellH,
-		maxRows:    30,
+		maxRows:    maxRows,
 		events:     make(chan proxy.AgentEvent, 1024),
+		texture:    tex,
+		texValid:   true,
+		dirty:      true,
 	}
 }
 
 func (n *AgentNode) Update() {
-	// Tick animation
-	if n.animType != animNone {
-		n.animTime += float64(rl.GetFrameTime())
-		switch n.animType {
-		case animSpawn:
-			if n.animTime >= animSpawnDuration {
-				n.animType = animNone
-			}
-		case animClose:
-			if n.animTime >= animCloseDuration {
-				n.animDone = true
-			}
-		}
-	}
+	n.TickAnim()
 
 	// Auto-despawn after 3 seconds of being done
-	if n.done && !n.closing && n.doneTime > 0 {
+	if n.done && !n.IsClosing && n.doneTime > 0 {
 		if float64(rl.GetTime())-n.doneTime > 3.0 {
 			n.StartCloseAnim()
 		}
@@ -160,6 +149,8 @@ func (n *AgentNode) handleEvent(evt proxy.AgentEvent) {
 		n.done = true
 		n.doneTime = float64(rl.GetTime())
 	}
+
+	n.dirty = true
 }
 
 func (n *AgentNode) lastBlock(typ string) *ContentBlock {
@@ -171,45 +162,24 @@ func (n *AgentNode) lastBlock(typ string) *ContentBlock {
 	return nil
 }
 
-func (n *AgentNode) Draw(camera rl.Camera2D) {
+func (n *AgentNode) PreDraw() {
+	if !n.dirty || !n.texValid {
+		return
+	}
+
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	// Animation
-	var offsetY float32
-	alpha := uint8(255)
+	s := int32(canvas.TexScale)
+	sh := s * int32(n.CellH)
+	sPad := s * int32(NodePad)
+	sFontSize := float32(s) * float32(n.FontSize)
 
-	switch n.animType {
-	case animSpawn:
-		t := n.animTime
-		if t < 0.2 {
-			p := t / 0.2
-			ease := 1.0 - (1.0-p)*(1.0-p)
-			offsetY = float32((1.0 - ease) * 60.0)
-			alpha = uint8(ease * 255.0)
-		}
-	case animClose:
-		p := n.animTime / animCloseDuration
-		if p > 1.0 {
-			p = 1.0
-		}
-		ease := p * p
-		offsetY = float32(ease * 40.0)
-		alpha = uint8((1.0 - ease) * 255.0)
-	}
-
-	drawX := n.Pos.X
-	drawY := n.Pos.Y + offsetY
-
-	width := float32(NodeCols*n.cellW + 2*NodePad)
-
-	// Render all blocks and calculate total height.
 	var lines []renderedLine
 	for _, b := range n.blocks {
 		lines = append(lines, n.renderBlock(b)...)
 	}
 
-	// Header line
 	headerText := fmt.Sprintf("Agent #%d", n.Number)
 	if n.ParentLabel != "" {
 		headerText = fmt.Sprintf("Agent #%d (parent: %s)", n.Number, n.ParentLabel)
@@ -221,36 +191,34 @@ func (n *AgentNode) Draw(camera rl.Camera2D) {
 		headerText += " (done)"
 	}
 
-	totalRows := 1 + len(lines) // header + content
+	totalRows := 1 + len(lines)
 	if totalRows > n.maxRows {
 		totalRows = n.maxRows
 	}
-	height := float32(totalRows*n.cellH + 2*NodePad)
 
-	// Background
-	rl.DrawRectangle(int32(drawX), int32(drawY), int32(width), int32(height),
-		rl.Color{R: 25, G: 25, B: 35, A: alpha})
+	// Store content height in world units for Draw()
+	n.contentHeight = float32(totalRows*n.CellH + 2*NodePad)
 
-	// Border
-	borderColor := rl.Color{R: 160, G: 100, B: 255, A: alpha} // purple
+	// Determine header color for texture rendering
+	headerColor := rl.Color{R: 160, G: 100, B: 255, A: 255}
 	if n.IsSubagent {
-		borderColor = rl.Color{R: 80, G: 200, B: 220, A: alpha} // cyan
+		headerColor = rl.Color{R: 80, G: 200, B: 220, A: 255}
 	}
 	if n.done {
-		borderColor.A = alpha / 2
+		headerColor.A = 128
 	}
-	rl.DrawRectangleLines(int32(drawX), int32(drawY), int32(width), int32(height), borderColor)
 
-	// Draw header
-	px := int32(drawX) + int32(NodePad)
-	py := int32(drawY) + int32(NodePad)
-	rl.DrawTextEx(n.font, headerText, rl.Vector2{X: float32(px), Y: float32(py)},
-		float32(n.fontSize), 0, rl.Color{R: borderColor.R, G: borderColor.G, B: borderColor.B, A: alpha})
-	py += int32(n.cellH)
+	rl.BeginTextureMode(n.texture)
+	rl.ClearBackground(rl.Color{R: 25, G: 25, B: 35, A: 255})
 
-	// Draw content lines (with scroll offset)
+	px := sPad
+	py := sPad
+	rl.DrawTextEx(n.Font, headerText, rl.Vector2{X: float32(px), Y: float32(py)},
+		sFontSize, 0, headerColor)
+	py += sh
+
 	startLine := n.scrollOffset
-	visibleRows := totalRows - 1 // minus header
+	visibleRows := totalRows - 1
 	if startLine > len(lines)-visibleRows {
 		startLine = len(lines) - visibleRows
 	}
@@ -260,10 +228,52 @@ func (n *AgentNode) Draw(camera rl.Camera2D) {
 
 	for i := startLine; i < len(lines) && (i-startLine) < visibleRows; i++ {
 		line := lines[i]
-		rl.DrawTextEx(n.font, line.text, rl.Vector2{X: float32(px), Y: float32(py)},
-			float32(n.fontSize), 0, rl.Color{R: line.color.R, G: line.color.G, B: line.color.B, A: alpha})
-		py += int32(n.cellH)
+		rl.DrawTextEx(n.Font, line.text, rl.Vector2{X: float32(px), Y: float32(py)},
+			sFontSize, 0, line.color)
+		py += sh
 	}
+
+	rl.EndTextureMode()
+	n.dirty = false
+}
+
+func (n *AgentNode) Draw(camera rl.Camera2D) {
+	_, offsetY, alpha := n.AnimOffset()
+
+	width := float32(NodeCols*n.CellW + 2*NodePad)
+	h := n.contentHeight
+	if h <= 0 {
+		h = float32(n.CellH + 2*NodePad) // minimum 1 row
+	}
+	s := float32(canvas.TexScale)
+	texH := float32(n.maxRows*n.CellH+2*NodePad) * s
+
+	drawX := n.Pos.X
+	drawY := n.Pos.Y + offsetY
+
+	// Blit only the content portion of the texture.
+	// Content is rendered at y=0 in render space, which maps to UV_y=1 (top of GL texture)
+	// due to OpenGL's inverted Y. Offset sourceRec.Y so the flip grabs the correct region.
+	sourceRec := rl.Rectangle{X: 0, Y: texH - h*s, Width: width * s, Height: -h * s}
+	destRec := rl.Rectangle{X: drawX, Y: drawY, Width: width, Height: h}
+	rl.DrawTexturePro(n.texture.Texture, sourceRec, destRec,
+		rl.Vector2{}, 0, rl.Color{R: 255, G: 255, B: 255, A: alpha})
+
+	// Draw border directly (not in texture) for clean zoom
+	borderColor := rl.Color{R: 160, G: 100, B: 255, A: alpha}
+	if n.IsSubagent {
+		borderColor = rl.Color{R: 80, G: 200, B: 220, A: alpha}
+	}
+	if n.done {
+		borderColor.A = alpha / 2
+	}
+	thick := float32(1.0)
+	if camera.Zoom > 0 {
+		thick = 1.0 / camera.Zoom
+	}
+	rl.DrawRectangleLinesEx(
+		rl.Rectangle{X: drawX, Y: drawY, Width: width, Height: h},
+		thick, borderColor)
 }
 
 type renderedLine struct {
@@ -312,16 +322,17 @@ func wrapText(text string, cols int, color rl.Color) []renderedLine {
 // --- Node interface implementation ---
 
 func (n *AgentNode) HandleKeyInput() {
-	// Scroll with page up/down when focused
-	if n.focused {
+	if n.IsFocused {
 		if rl.IsKeyPressed(rl.KeyPageUp) {
 			n.scrollOffset -= 10
 			if n.scrollOffset < 0 {
 				n.scrollOffset = 0
 			}
+			n.dirty = true
 		}
 		if rl.IsKeyPressed(rl.KeyPageDown) {
 			n.scrollOffset += 10
+			n.dirty = true
 		}
 	}
 }
@@ -336,25 +347,35 @@ func (n *AgentNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vector2) 
 		if n.scrollOffset < 0 {
 			n.scrollOffset = 0
 		}
+		n.dirty = true
 	}
 }
 
-func (n *AgentNode) Position() rl.Vector2    { return n.Pos }
-func (n *AgentNode) SetPosition(p rl.Vector2) { n.Pos = p }
-
 func (n *AgentNode) Size() rl.Vector2 {
-	width := float32(NodeCols*n.cellW + 2*NodePad)
-	totalRows := n.maxRows
-	height := float32(totalRows*n.cellH + 2*NodePad)
-	return rl.Vector2{X: width, Y: height}
+	width := float32(NodeCols*n.CellW + 2*NodePad)
+	h := n.contentHeight
+	if h <= 0 {
+		h = float32(n.CellH + 2*NodePad)
+	}
+	return rl.Vector2{X: width, Y: h}
 }
 
 func (n *AgentNode) SetSize(cols, rows uint16) {
-	n.maxRows = int(rows)
-}
-
-func (n *AgentNode) CellSize() (int, int) {
-	return n.cellW, n.cellH
+	newMaxRows := int(rows)
+	if newMaxRows != n.maxRows {
+		n.maxRows = newMaxRows
+		// Recreate texture for new size
+		if n.texValid {
+			rl.UnloadRenderTexture(n.texture)
+		}
+		sc := int32(canvas.TexScale)
+		texW := int32(NodeCols*n.CellW+2*NodePad) * sc
+		texH := int32(n.maxRows*n.CellH+2*NodePad) * sc
+		n.texture = rl.LoadRenderTexture(texW, texH)
+		rl.SetTextureFilter(n.texture.Texture, rl.FilterBilinear)
+		n.texValid = true
+		n.dirty = true
+	}
 }
 
 func (n *AgentNode) Contains(worldPoint rl.Vector2) bool {
@@ -363,23 +384,20 @@ func (n *AgentNode) Contains(worldPoint rl.Vector2) bool {
 		worldPoint.Y >= n.Pos.Y && worldPoint.Y <= n.Pos.Y+size.Y
 }
 
-func (n *AgentNode) Focused() bool      { return n.focused }
-func (n *AgentNode) SetFocused(f bool)   { n.focused = f }
-func (n *AgentNode) Closing() bool       { return n.closing }
-func (n *AgentNode) AnimDone() bool      { return n.animDone }
-func (n *AgentNode) Sandboxed() bool     { return false }
-func (n *AgentNode) Free()               {}
-
-func (n *AgentNode) StartCloseAnim() {
-	n.closing = true
-	n.animType = animClose
-	n.animTime = 0
-	n.animDone = false
+func (n *AgentNode) SetFocused(f bool) {
+	if n.IsFocused != f {
+		n.dirty = true
+	}
+	n.NodeBase.SetFocused(f)
 }
 
-func (n *AgentNode) StartSpawnAnim() {
-	n.animType = animSpawn
-	n.animTime = 0
+func (n *AgentNode) Sandboxed() bool { return false }
+
+func (n *AgentNode) Free() {
+	if n.texValid {
+		rl.UnloadRenderTexture(n.texture)
+		n.texValid = false
+	}
 }
 
 // Events returns the channel for sending events to this node.

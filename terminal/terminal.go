@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"claudehouse/canvas"
 	"claudehouse/ghostty"
 	"claudehouse/sandbox"
 	"math"
@@ -13,18 +14,9 @@ import (
 
 const Pad = 4
 
-const (
-	animNone  = 0
-	animSpawn = 1
-	animClose = 2
-)
-
-const (
-	animSpawnDuration = 0.5
-	animCloseDuration = 0.25
-)
-
 type TerminalNode struct {
+	canvas.NodeBase
+
 	terminal     *ghostty.Terminal
 	renderState  *ghostty.RenderState
 	rowIter      *ghostty.RowIterator
@@ -36,23 +28,20 @@ type TerminalNode struct {
 
 	pty *PTY
 
-	Pos        rl.Vector2
 	cols, rows uint16
-	cellW      int
-	cellH      int
-	fontSize   int
-	font       rl.Font
 
-	focused bool
-	title   string
-
-	animTime float64
-	animType int
-	closing  bool
-	animDone bool
+	title string
 
 	scrollAccum float32
 	sandboxed   bool
+
+	// RenderTexture caching
+	texture       rl.RenderTexture2D
+	texValid      bool
+	dirty         bool
+	lastCursorVis bool
+	lastCursorX   uint16
+	lastCursorY   uint16
 
 	// Text selection state
 	selecting    bool
@@ -153,7 +142,20 @@ func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, 
 
 	term.SetEffects(p.Fd(), cellW, cellH, cols, rows)
 
+	s := int32(canvas.TexScale)
+	texW := int32(int(cols)*cellW+2*Pad) * s
+	texH := int32(int(rows)*cellH+2*Pad) * s
+	tex := rl.LoadRenderTexture(texW, texH)
+	rl.SetTextureFilter(tex.Texture, rl.FilterBilinear)
+
 	return &TerminalNode{
+		NodeBase: canvas.NodeBase{
+			Pos:      pos,
+			Font:     font,
+			FontSize: fontSize,
+			CellW:    cellW,
+			CellH:    cellH,
+		},
 		terminal:     term,
 		renderState:  rs,
 		rowIter:      ri,
@@ -163,32 +165,17 @@ func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, 
 		mouseEncoder: me,
 		mouseEvent:   mouseEvt,
 		pty:          p,
-		Pos:          pos,
 		cols:         cols,
 		rows:         rows,
-		cellW:        cellW,
-		cellH:        cellH,
-		fontSize:     fontSize,
-		font:         font,
 		sandboxed:    sandboxed,
+		texture:      tex,
+		texValid:     true,
+		dirty:        true,
 	}, nil
 }
 
 func (tn *TerminalNode) Update() {
-	// Tick animation
-	if tn.animType != animNone {
-		tn.animTime += float64(rl.GetFrameTime())
-		switch tn.animType {
-		case animSpawn:
-			if tn.animTime >= animSpawnDuration {
-				tn.animType = animNone
-			}
-		case animClose:
-			if tn.animTime >= animCloseDuration {
-				tn.animDone = true
-			}
-		}
-	}
+	tn.TickAnim()
 
 	// Smooth scroll: consume accumulated scroll lines
 	if tn.scrollAccum != 0 {
@@ -197,6 +184,7 @@ func (tn *TerminalNode) Update() {
 			lines := int(math.Round(float64(tn.scrollAccum)))
 			if lines != 0 {
 				tn.terminal.ScrollViewport(lines)
+				tn.dirty = true
 			}
 			tn.scrollAccum = 0
 		} else {
@@ -204,12 +192,13 @@ func (tn *TerminalNode) Update() {
 			if lines != 0 {
 				tn.terminal.ScrollViewport(lines)
 				tn.scrollAccum -= float32(lines)
+				tn.dirty = true
 			}
 		}
 	}
 
 	// Check if shell process exited
-	if !tn.closing {
+	if !tn.IsClosing {
 		select {
 		case <-tn.pty.Done():
 			tn.StartCloseAnim()
@@ -222,6 +211,7 @@ func (tn *TerminalNode) Update() {
 		select {
 		case data := <-tn.pty.Output():
 			tn.terminal.VTWrite(data)
+			tn.dirty = true
 		default:
 			goto done
 		}
@@ -234,63 +224,29 @@ done:
 	}
 }
 
-func (tn *TerminalNode) Draw(camera rl.Camera2D) {
+func (tn *TerminalNode) PreDraw() {
 	tn.renderState.Update(tn.terminal)
 
-	// Compute animation offset and alpha
-	var offsetX, offsetY float32
-	alpha := uint8(255)
-
-	switch tn.animType {
-	case animSpawn:
-		t := tn.animTime
-		if t < 0.2 {
-			// Slide phase: Y +60 → 0, opacity 0 → 1
-			p := t / 0.2
-			ease := 1.0 - (1.0-p)*(1.0-p) // ease-out quadratic
-			offsetY = float32((1.0 - ease) * 60.0)
-			alpha = uint8(ease * 255.0)
-		} else {
-			// Jiggle phase: small X oscillation, damped sine
-			jt := t - 0.2
-			jDur := animSpawnDuration - 0.2
-			p := jt / jDur
-			damping := 1.0 - p
-			offsetX = float32(damping * 8.0 * math.Sin(p*math.Pi*3))
-		}
-	case animClose:
-		p := tn.animTime / animCloseDuration
-		if p > 1.0 {
-			p = 1.0
-		}
-		ease := p * p // ease-in quadratic
-		offsetY = float32(ease * 40.0)
-		alpha = uint8((1.0 - ease) * 255.0)
+	// Detect cursor state changes
+	curVis := tn.renderState.GetCursorVisible() && tn.renderState.GetCursorInViewport()
+	cx, cy := tn.renderState.GetCursorPos()
+	if curVis != tn.lastCursorVis || cx != tn.lastCursorX || cy != tn.lastCursorY {
+		tn.dirty = true
+		tn.lastCursorVis = curVis
+		tn.lastCursorX = cx
+		tn.lastCursorY = cy
 	}
 
-	drawX := tn.Pos.X + offsetX
-	drawY := tn.Pos.Y + offsetY
+	if !tn.dirty || !tn.texValid {
+		return
+	}
 
-	// Calculate screen position including padding
-	padX := int(drawX) + Pad
-	padY := int(drawY) + Pad
-
-	// Draw terminal background
+	s := canvas.TexScale
 	colors := tn.renderState.GetColors()
 	bg := colors.Background
-	width := int(tn.cols)*tn.cellW + 2*Pad
-	height := int(tn.rows)*tn.cellH + 2*Pad
-	rl.DrawRectangle(int32(drawX), int32(drawY), int32(width), int32(height),
-		rl.Color{R: bg.R, G: bg.G, B: bg.B, A: alpha})
 
-	// Draw border if focused (orange for sandboxed, blue for normal)
-	if tn.focused {
-		borderColor := rl.Color{R: 100, G: 150, B: 255, A: alpha}
-		if tn.sandboxed {
-			borderColor = rl.Color{R: 255, G: 160, B: 40, A: alpha}
-		}
-		rl.DrawRectangleLines(int32(drawX)-1, int32(drawY)-1, int32(width)+2, int32(height)+2, borderColor)
-	}
+	rl.BeginTextureMode(tn.texture)
+	rl.ClearBackground(rl.Color{R: bg.R, G: bg.G, B: bg.B, A: 255})
 
 	sc, sr, ec, er, selActive := tn.Selection()
 	sel := SelectionRange{
@@ -298,29 +254,60 @@ func (tn *TerminalNode) Draw(camera rl.Camera2D) {
 		EndCol: ec, EndRow: er,
 		Active: selActive,
 	}
-	DrawTerminal(tn.renderState, tn.rowIter, tn.rowCells, tn.font,
-		tn.cellW, tn.cellH, tn.fontSize, padX, padY, alpha, sel)
+	DrawTerminal(tn.renderState, tn.rowIter, tn.rowCells, tn.Font,
+		tn.CellW*s, tn.CellH*s, tn.FontSize*s, Pad*s, Pad*s, 255, sel)
+
+	rl.EndTextureMode()
+	tn.dirty = false
 }
 
-func (tn *TerminalNode) Closing() bool {
-	return tn.closing
+func (tn *TerminalNode) Draw(camera rl.Camera2D) {
+	// Compute animation offset and alpha
+	offsetX, offsetY, alpha := tn.NodeBase.AnimOffset()
+	// Add jiggle phase for spawn animation (t >= 0.2)
+	if tn.AnimType == canvas.AnimSpawn && tn.AnimTime >= 0.2 {
+		jt := tn.AnimTime - 0.2
+		jDur := canvas.AnimSpawnDuration - 0.2
+		p := jt / jDur
+		damping := 1.0 - p
+		offsetX = float32(damping * 8.0 * math.Sin(p*math.Pi*3))
+	}
+
+	width := int32(int(tn.cols)*tn.CellW + 2*Pad)
+	height := int32(int(tn.rows)*tn.CellH + 2*Pad)
+
+	drawX := tn.Pos.X + offsetX
+	drawY := tn.Pos.Y + offsetY
+
+	// Draw terminal background
+	colors := tn.renderState.GetColors()
+	bg := colors.Background
+	rl.DrawRectangle(int32(drawX), int32(drawY), width, height,
+		rl.Color{R: bg.R, G: bg.G, B: bg.B, A: alpha})
+
+	// Draw border if focused (orange for sandboxed, blue for normal)
+	if tn.IsFocused {
+		borderColor := rl.Color{R: 100, G: 150, B: 255, A: alpha}
+		if tn.sandboxed {
+			borderColor = rl.Color{R: 255, G: 160, B: 40, A: alpha}
+		}
+		thick := float32(1.0)
+		if camera.Zoom > 0 {
+			thick = 1.0 / camera.Zoom
+		}
+		rl.DrawRectangleLinesEx(
+			rl.Rectangle{X: drawX - thick, Y: drawY - thick, Width: float32(width) + 2*thick, Height: float32(height) + 2*thick},
+			thick, borderColor)
+	}
+
+	// Blit cached texture (rendered at TexScale) at 1x world size
+	s := float32(canvas.TexScale)
+	sourceRec := rl.Rectangle{X: 0, Y: 0, Width: float32(width) * s, Height: -float32(height) * s}
+	destRec := rl.Rectangle{X: drawX, Y: drawY, Width: float32(width), Height: float32(height)}
+	rl.DrawTexturePro(tn.texture.Texture, sourceRec, destRec,
+		rl.Vector2{}, 0, rl.Color{R: 255, G: 255, B: 255, A: alpha})
 }
 
-func (tn *TerminalNode) StartCloseAnim() {
-	tn.closing = true
-	tn.animType = animClose
-	tn.animTime = 0
-	tn.animDone = false
-}
-
-func (tn *TerminalNode) StartSpawnAnim() {
-	tn.animType = animSpawn
-	tn.animTime = 0
-}
-
-func (tn *TerminalNode) AnimDone() bool {
-	return tn.animDone
-}
 
 var keysToCheck []int32
 
@@ -390,7 +377,7 @@ func (tn *TerminalNode) processKey(rlKey int32, action ghostty.KeyAction, charUt
 }
 
 func (tn *TerminalNode) HandleKeyInput() {
-	if tn.closing {
+	if tn.IsClosing {
 		return
 	}
 	tn.keyEncoder.SetOptFromTerminal(tn.terminal)
@@ -440,8 +427,8 @@ func (tn *TerminalNode) HandleKeyInput() {
 func (tn *TerminalNode) mouseToCellPos(mouseWorld rl.Vector2) (col, row int) {
 	localX := mouseWorld.X - tn.Pos.X - float32(Pad)
 	localY := mouseWorld.Y - tn.Pos.Y - float32(Pad)
-	col = int(localX) / tn.cellW
-	row = int(localY) / tn.cellH
+	col = int(localX) / tn.CellW
+	row = int(localY) / tn.CellH
 	if col < 0 {
 		col = 0
 	}
@@ -480,7 +467,7 @@ func (tn *TerminalNode) ClearSelection() {
 const copyDebounce = 150 * time.Millisecond
 
 func (tn *TerminalNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vector2) {
-	if tn.closing {
+	if tn.IsClosing {
 		return
 	}
 
@@ -495,6 +482,9 @@ func (tn *TerminalNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vecto
 			tn.selStartRow = row
 			tn.selEndCol = col
 			tn.selEndRow = row
+			if tn.selHasRange {
+				tn.dirty = true // clearing previous selection
+			}
 			tn.selHasRange = false
 			tn.selCopyTimer = 0
 		}
@@ -504,6 +494,7 @@ func (tn *TerminalNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vecto
 				tn.selEndCol = col
 				tn.selEndRow = row
 				tn.selHasRange = true
+				tn.dirty = true
 			}
 		}
 		if tn.selecting && rl.IsMouseButtonReleased(rl.MouseButtonLeft) {
@@ -526,9 +517,9 @@ func (tn *TerminalNode) HandleMouseInput(camera rl.Camera2D, mouseWorld rl.Vecto
 	tn.mouseEncoder.SetOptFromTerminal(tn.terminal)
 
 	// Set encoder size relative to the terminal node's position
-	width := int(tn.cols)*tn.cellW + 2*Pad
-	height := int(tn.rows)*tn.cellH + 2*Pad
-	tn.mouseEncoder.SetSize(width, height, tn.cellW, tn.cellH, Pad)
+	width := int(tn.cols)*tn.CellW + 2*Pad
+	height := int(tn.rows)*tn.CellH + 2*Pad
+	tn.mouseEncoder.SetSize(width, height, tn.CellW, tn.CellH, Pad)
 
 	anyPressed := rl.IsMouseButtonDown(rl.MouseButtonLeft) ||
 		rl.IsMouseButtonDown(rl.MouseButtonRight) ||
@@ -713,17 +704,9 @@ func (tn *TerminalNode) mouseEncodeAndWrite() {
 	}
 }
 
-func (tn *TerminalNode) Position() rl.Vector2 {
-	return tn.Pos
-}
-
-func (tn *TerminalNode) SetPosition(pos rl.Vector2) {
-	tn.Pos = pos
-}
-
 func (tn *TerminalNode) Size() rl.Vector2 {
-	width := float32(int(tn.cols)*tn.cellW + 2*Pad)
-	height := float32(int(tn.rows)*tn.cellH + 2*Pad)
+	width := float32(int(tn.cols)*tn.CellW + 2*Pad)
+	height := float32(int(tn.rows)*tn.CellH + 2*Pad)
 	return rl.Vector2{X: width, Y: height}
 }
 
@@ -736,13 +719,21 @@ func (tn *TerminalNode) SetSize(cols, rows uint16) {
 	}
 	tn.cols = cols
 	tn.rows = rows
-	tn.terminal.Resize(cols, rows, tn.cellW, tn.cellH)
+	tn.terminal.Resize(cols, rows, tn.CellW, tn.CellH)
 	tn.terminal.UpdateEffectsSize(cols, rows)
-	tn.pty.Resize(cols, rows, tn.cellW, tn.cellH)
-}
+	tn.pty.Resize(cols, rows, tn.CellW, tn.CellH)
 
-func (tn *TerminalNode) CellSize() (int, int) {
-	return tn.cellW, tn.cellH
+	// Recreate render texture for new size
+	if tn.texValid {
+		rl.UnloadRenderTexture(tn.texture)
+	}
+	sc := int32(canvas.TexScale)
+	texW := int32(int(cols)*tn.CellW+2*Pad) * sc
+	texH := int32(int(rows)*tn.CellH+2*Pad) * sc
+	tn.texture = rl.LoadRenderTexture(texW, texH)
+	rl.SetTextureFilter(tn.texture.Texture, rl.FilterBilinear)
+	tn.texValid = true
+	tn.dirty = true
 }
 
 func (tn *TerminalNode) Contains(worldPoint rl.Vector2) bool {
@@ -755,15 +746,15 @@ func (tn *TerminalNode) Sandboxed() bool {
 	return tn.sandboxed
 }
 
-func (tn *TerminalNode) Focused() bool {
-	return tn.focused
-}
-
 func (tn *TerminalNode) SetFocused(f bool) {
-	tn.focused = f
+	tn.NodeBase.SetFocused(f)
 }
 
 func (tn *TerminalNode) Free() {
+	if tn.texValid {
+		rl.UnloadRenderTexture(tn.texture)
+		tn.texValid = false
+	}
 	tn.pty.Close()
 	tn.mouseEvent.Free()
 	tn.mouseEncoder.Free()

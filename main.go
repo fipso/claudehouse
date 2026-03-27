@@ -69,8 +69,7 @@ func main() {
 	configDir := filepath.Join(homeDir, ".config", "claudehouse")
 	cfg, err := config.Load(configDir)
 	if err != nil {
-		log.Printf("WARNING: failed to load config: %v", err)
-		cfg = config.DefaultConfig()
+		log.Fatalf("config error: %v", err)
 	}
 
 	// Apply canvas config

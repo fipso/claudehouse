@@ -46,6 +46,8 @@ type AgentNode struct {
 
 	// RenderTexture caching
 	texture       rl.RenderTexture2D
+	mip2Texture   rl.RenderTexture2D // 2x intermediate mip
+	mipTexture    rl.RenderTexture2D // 1x resolution for zoom-out
 	texValid      bool
 	dirty         bool
 	contentHeight float32 // visible content height in world units (set by PreDraw)
@@ -60,10 +62,14 @@ type AgentNode struct {
 func NewAgentNode(pos rl.Vector2, font rl.Font, fontSize, cellW, cellH int, streamID, terminalID string, isSubagent bool) *AgentNode {
 	maxRows := 30
 	s := int32(canvas.TexScale)
-	texW := int32(NodeCols*cellW+2*NodePad) * s
-	texH := int32(maxRows*cellH+2*NodePad) * s
-	tex := rl.LoadRenderTexture(texW, texH)
+	logW := int32(NodeCols*cellW + 2*NodePad)
+	logH := int32(maxRows*cellH + 2*NodePad)
+	tex := rl.LoadRenderTexture(logW*s, logH*s)
 	rl.SetTextureFilter(tex.Texture, rl.FilterBilinear)
+	mip2 := rl.LoadRenderTexture(logW*2, logH*2)
+	rl.SetTextureFilter(mip2.Texture, rl.FilterBilinear)
+	mip := rl.LoadRenderTexture(logW, logH)
+	rl.SetTextureFilter(mip.Texture, rl.FilterBilinear)
 
 	return &AgentNode{
 		NodeBase: canvas.NodeBase{
@@ -78,7 +84,9 @@ func NewAgentNode(pos rl.Vector2, font rl.Font, fontSize, cellW, cellH int, stre
 		IsSubagent: isSubagent,
 		maxRows:    maxRows,
 		events:     make(chan proxy.AgentEvent, 1024),
-		texture:    tex,
+		texture:     tex,
+		mip2Texture: mip2,
+		mipTexture:  mip,
 		texValid:   true,
 		dirty:      true,
 	}
@@ -234,6 +242,26 @@ func (n *AgentNode) PreDraw() {
 	}
 
 	rl.EndTextureMode()
+
+	// 2-step downsample: 4x→2x→1x
+	sf := float32(s)
+	logW := float32(NodeCols*n.CellW + 2*NodePad)
+	logH := float32(n.maxRows*n.CellH + 2*NodePad)
+	// 4x → 2x
+	rl.BeginTextureMode(n.mip2Texture)
+	rl.DrawTexturePro(n.texture.Texture,
+		rl.Rectangle{X: 0, Y: 0, Width: logW * sf, Height: -logH * sf},
+		rl.Rectangle{X: 0, Y: 0, Width: logW * 2, Height: logH * 2},
+		rl.Vector2{}, 0, rl.White)
+	rl.EndTextureMode()
+	// 2x → 1x
+	rl.BeginTextureMode(n.mipTexture)
+	rl.DrawTexturePro(n.mip2Texture.Texture,
+		rl.Rectangle{X: 0, Y: 0, Width: logW * 2, Height: -logH * 2},
+		rl.Rectangle{X: 0, Y: 0, Width: logW, Height: logH},
+		rl.Vector2{}, 0, rl.White)
+	rl.EndTextureMode()
+
 	n.dirty = false
 }
 
@@ -245,18 +273,35 @@ func (n *AgentNode) Draw(camera rl.Camera2D) {
 	if h <= 0 {
 		h = float32(n.CellH + 2*NodePad) // minimum 1 row
 	}
-	s := float32(canvas.TexScale)
-	texH := float32(n.maxRows*n.CellH+2*NodePad) * s
+	maxH := float32(n.maxRows*n.CellH + 2*NodePad)
 
 	drawX := n.Pos.X
 	drawY := n.Pos.Y + offsetY
 
-	// Blit only the content portion of the texture.
-	// Content is rendered at y=0 in render space, which maps to UV_y=1 (top of GL texture)
-	// due to OpenGL's inverted Y. Offset sourceRec.Y so the flip grabs the correct region.
-	sourceRec := rl.Rectangle{X: 0, Y: texH - h*s, Width: width * s, Height: -h * s}
+	// Pick mip level based on zoom: 4x, 2x, or 1x
+	var tex rl.Texture2D
+	var srcW, srcTexH, srcH float32
+	if camera.Zoom >= 1.0 {
+		s := float32(canvas.TexScale)
+		tex = n.texture.Texture
+		srcW = width * s
+		srcTexH = maxH * s
+		srcH = h * s
+	} else if camera.Zoom >= 0.5 {
+		tex = n.mip2Texture.Texture
+		srcW = width * 2
+		srcTexH = maxH * 2
+		srcH = h * 2
+	} else {
+		tex = n.mipTexture.Texture
+		srcW = width
+		srcTexH = maxH
+		srcH = h
+	}
+	// Content is at y=0 in render space → UV_y=1 in GL. Offset sourceRec.Y accordingly.
+	sourceRec := rl.Rectangle{X: 0, Y: srcTexH - srcH, Width: srcW, Height: -srcH}
 	destRec := rl.Rectangle{X: drawX, Y: drawY, Width: width, Height: h}
-	rl.DrawTexturePro(n.texture.Texture, sourceRec, destRec,
+	rl.DrawTexturePro(tex, sourceRec, destRec,
 		rl.Vector2{}, 0, rl.Color{R: 255, G: 255, B: 255, A: alpha})
 
 	// Draw border directly (not in texture) for clean zoom
@@ -367,12 +412,18 @@ func (n *AgentNode) SetSize(cols, rows uint16) {
 		// Recreate texture for new size
 		if n.texValid {
 			rl.UnloadRenderTexture(n.texture)
+			rl.UnloadRenderTexture(n.mip2Texture)
+			rl.UnloadRenderTexture(n.mipTexture)
 		}
 		sc := int32(canvas.TexScale)
-		texW := int32(NodeCols*n.CellW+2*NodePad) * sc
-		texH := int32(n.maxRows*n.CellH+2*NodePad) * sc
-		n.texture = rl.LoadRenderTexture(texW, texH)
+		logW := int32(NodeCols*n.CellW + 2*NodePad)
+		logH := int32(n.maxRows*n.CellH + 2*NodePad)
+		n.texture = rl.LoadRenderTexture(logW*sc, logH*sc)
 		rl.SetTextureFilter(n.texture.Texture, rl.FilterBilinear)
+		n.mip2Texture = rl.LoadRenderTexture(logW*2, logH*2)
+		rl.SetTextureFilter(n.mip2Texture.Texture, rl.FilterBilinear)
+		n.mipTexture = rl.LoadRenderTexture(logW, logH)
+		rl.SetTextureFilter(n.mipTexture.Texture, rl.FilterBilinear)
 		n.texValid = true
 		n.dirty = true
 	}
@@ -396,6 +447,8 @@ func (n *AgentNode) Sandboxed() bool { return false }
 func (n *AgentNode) Free() {
 	if n.texValid {
 		rl.UnloadRenderTexture(n.texture)
+		rl.UnloadRenderTexture(n.mip2Texture)
+		rl.UnloadRenderTexture(n.mipTexture)
 		n.texValid = false
 	}
 }

@@ -97,7 +97,7 @@ func main() {
 	dpiScale := rl.GetWindowScaleDPI()
 	fontSize := int32(16)
 	fontSizePx := int32(float32(fontSize) * dpiScale.Y)
-	fontLoadSize := fontSizePx * 3 // Load at 3x for crisp zoom
+	fontLoadSize := fontSizePx * int32(canvas.TexScale) // Match texture resolution for crisp rendering
 	font := rl.LoadFontFromMemory(".ttf", fontData, fontLoadSize, fontCodepoints())
 	rl.SetTextureFilter(font.Texture, rl.FilterBilinear)
 	defer rl.UnloadFont(font)

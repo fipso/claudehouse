@@ -37,6 +37,8 @@ type TerminalNode struct {
 
 	// RenderTexture caching
 	texture       rl.RenderTexture2D
+	mip2Texture   rl.RenderTexture2D // 2x resolution intermediate mip
+	mipTexture    rl.RenderTexture2D // 1x resolution for zoom-out
 	texValid      bool
 	dirty         bool
 	lastCursorVis bool
@@ -143,10 +145,14 @@ func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, 
 	term.SetEffects(p.Fd(), cellW, cellH, cols, rows)
 
 	s := int32(canvas.TexScale)
-	texW := int32(int(cols)*cellW+2*Pad) * s
-	texH := int32(int(rows)*cellH+2*Pad) * s
-	tex := rl.LoadRenderTexture(texW, texH)
+	logW := int32(int(cols)*cellW + 2*Pad)
+	logH := int32(int(rows)*cellH + 2*Pad)
+	tex := rl.LoadRenderTexture(logW*s, logH*s)
 	rl.SetTextureFilter(tex.Texture, rl.FilterBilinear)
+	mip2 := rl.LoadRenderTexture(logW*2, logH*2)
+	rl.SetTextureFilter(mip2.Texture, rl.FilterBilinear)
+	mip := rl.LoadRenderTexture(logW, logH)
+	rl.SetTextureFilter(mip.Texture, rl.FilterBilinear)
 
 	return &TerminalNode{
 		NodeBase: canvas.NodeBase{
@@ -169,6 +175,8 @@ func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, 
 		rows:         rows,
 		sandboxed:    sandboxed,
 		texture:      tex,
+		mip2Texture:  mip2,
+		mipTexture:   mip,
 		texValid:     true,
 		dirty:        true,
 	}, nil
@@ -258,6 +266,27 @@ func (tn *TerminalNode) PreDraw() {
 		tn.CellW*s, tn.CellH*s, tn.FontSize*s, Pad*s, Pad*s, 255, sel)
 
 	rl.EndTextureMode()
+
+	// 2-step downsample: 4x→2x→1x. Each step is a clean 2x reduction
+	// that bilinear filtering handles perfectly.
+	logW := float32(int(tn.cols)*tn.CellW + 2*Pad)
+	logH := float32(int(tn.rows)*tn.CellH + 2*Pad)
+	sf := float32(s)
+	// 4x → 2x
+	rl.BeginTextureMode(tn.mip2Texture)
+	rl.DrawTexturePro(tn.texture.Texture,
+		rl.Rectangle{X: 0, Y: 0, Width: logW * sf, Height: -logH * sf},
+		rl.Rectangle{X: 0, Y: 0, Width: logW * 2, Height: logH * 2},
+		rl.Vector2{}, 0, rl.White)
+	rl.EndTextureMode()
+	// 2x → 1x
+	rl.BeginTextureMode(tn.mipTexture)
+	rl.DrawTexturePro(tn.mip2Texture.Texture,
+		rl.Rectangle{X: 0, Y: 0, Width: logW * 2, Height: -logH * 2},
+		rl.Rectangle{X: 0, Y: 0, Width: logW, Height: logH},
+		rl.Vector2{}, 0, rl.White)
+	rl.EndTextureMode()
+
 	tn.dirty = false
 }
 
@@ -300,11 +329,26 @@ func (tn *TerminalNode) Draw(camera rl.Camera2D) {
 			thick, borderColor)
 	}
 
-	// Blit cached texture (rendered at TexScale) at 1x world size
-	s := float32(canvas.TexScale)
-	sourceRec := rl.Rectangle{X: 0, Y: 0, Width: float32(width) * s, Height: -float32(height) * s}
+	// Pick mip level based on zoom: 4x, 2x, or 1x
+	var tex rl.Texture2D
+	var srcW, srcH float32
+	if camera.Zoom >= 1.0 {
+		s := float32(canvas.TexScale)
+		tex = tn.texture.Texture
+		srcW = float32(width) * s
+		srcH = float32(height) * s
+	} else if camera.Zoom >= 0.5 {
+		tex = tn.mip2Texture.Texture
+		srcW = float32(width) * 2
+		srcH = float32(height) * 2
+	} else {
+		tex = tn.mipTexture.Texture
+		srcW = float32(width)
+		srcH = float32(height)
+	}
+	sourceRec := rl.Rectangle{X: 0, Y: 0, Width: srcW, Height: -srcH}
 	destRec := rl.Rectangle{X: drawX, Y: drawY, Width: float32(width), Height: float32(height)}
-	rl.DrawTexturePro(tn.texture.Texture, sourceRec, destRec,
+	rl.DrawTexturePro(tex, sourceRec, destRec,
 		rl.Vector2{}, 0, rl.Color{R: 255, G: 255, B: 255, A: alpha})
 }
 
@@ -723,15 +767,21 @@ func (tn *TerminalNode) SetSize(cols, rows uint16) {
 	tn.terminal.UpdateEffectsSize(cols, rows)
 	tn.pty.Resize(cols, rows, tn.CellW, tn.CellH)
 
-	// Recreate render texture for new size
+	// Recreate render textures for new size
 	if tn.texValid {
 		rl.UnloadRenderTexture(tn.texture)
+		rl.UnloadRenderTexture(tn.mip2Texture)
+		rl.UnloadRenderTexture(tn.mipTexture)
 	}
 	sc := int32(canvas.TexScale)
-	texW := int32(int(cols)*tn.CellW+2*Pad) * sc
-	texH := int32(int(rows)*tn.CellH+2*Pad) * sc
-	tn.texture = rl.LoadRenderTexture(texW, texH)
+	logW := int32(int(cols)*tn.CellW + 2*Pad)
+	logH := int32(int(rows)*tn.CellH + 2*Pad)
+	tn.texture = rl.LoadRenderTexture(logW*sc, logH*sc)
 	rl.SetTextureFilter(tn.texture.Texture, rl.FilterBilinear)
+	tn.mip2Texture = rl.LoadRenderTexture(logW*2, logH*2)
+	rl.SetTextureFilter(tn.mip2Texture.Texture, rl.FilterBilinear)
+	tn.mipTexture = rl.LoadRenderTexture(logW, logH)
+	rl.SetTextureFilter(tn.mipTexture.Texture, rl.FilterBilinear)
 	tn.texValid = true
 	tn.dirty = true
 }
@@ -753,6 +803,8 @@ func (tn *TerminalNode) SetFocused(f bool) {
 func (tn *TerminalNode) Free() {
 	if tn.texValid {
 		rl.UnloadRenderTexture(tn.texture)
+		rl.UnloadRenderTexture(tn.mip2Texture)
+		rl.UnloadRenderTexture(tn.mipTexture)
 		tn.texValid = false
 	}
 	tn.pty.Close()

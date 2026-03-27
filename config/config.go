@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -20,9 +21,9 @@ type Config struct {
 }
 
 type SandboxProfile struct {
-	AllowedLANRanges []string     `toml:"allowed_lan_ranges"`
-	MountHome        *bool        `toml:"mount_home"` // nil = true (default)
-	Mounts           []MountEntry `toml:"mounts"`
+	AllowedLANRanges []string `toml:"allowed_lan_ranges"`
+	MountHome        *bool    `toml:"mount_home"` // nil = true (default)
+	Mounts           []string `toml:"mounts"`     // "/path:ro" or "/path:rw"
 }
 
 // ShouldMountHome returns whether the home directory should be auto-mounted rw.
@@ -30,9 +31,19 @@ func (p SandboxProfile) ShouldMountHome() bool {
 	return p.MountHome == nil || *p.MountHome
 }
 
-type MountEntry struct {
-	Path string `toml:"path"`
-	Mode string `toml:"mode"` // "ro" or "rw"
+// ParseMount splits a mount string like "/path:ro" into path and mode.
+// If no :mode suffix is given, defaults to "rw".
+func ParseMount(s string) (path, mode string, err error) {
+	i := strings.LastIndex(s, ":")
+	if i < 0 {
+		return s, "rw", nil
+	}
+	suffix := s[i+1:]
+	if suffix == "ro" || suffix == "rw" {
+		return s[:i], suffix, nil
+	}
+	// Colon is part of the path (no valid mode suffix), treat whole string as path.
+	return s, "rw", nil
 }
 
 func DefaultConfig() *Config {
@@ -72,15 +83,12 @@ default_sandbox_profile = "default"
 [sandbox.default]
 # mount_home = true   # Set to false to hide your home directory (tmpfs overlay).
 # allowed_lan_ranges = ["192.168.1.0/24"]
-
-# Add extra bind mounts with [[sandbox.default.mounts]]:
-# [[sandbox.default.mounts]]
-# path = "/data/projects"
-# mode = "ro"
-#
-# [[sandbox.default.mounts]]
-# path = "/mnt/shared"
-# mode = "rw"
+# mounts = [
+#   "/home/user/.claude",        # no suffix = rw
+#   "/home/user/.claude.json",
+#   "/home/user/code/myproject",
+#   "/data/datasets:ro",
+# ]
 `
 
 // Load reads config.toml from configDir. If the file does not exist, it writes
@@ -135,8 +143,8 @@ func (c *Config) validate() error {
 			}
 		}
 		for _, m := range profile.Mounts {
-			if m.Mode != "ro" && m.Mode != "rw" {
-				return fmt.Errorf("sandbox profile %q: mount %q: mode must be \"ro\" or \"rw\", got %q", name, m.Path, m.Mode)
+			if _, _, err := ParseMount(m); err != nil {
+				return fmt.Errorf("sandbox profile %q: %w", name, err)
 			}
 		}
 	}

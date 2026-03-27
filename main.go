@@ -160,7 +160,8 @@ func main() {
 	sandboxProfile := cfg.ActiveSandboxProfile()
 	var extraMounts []sandbox.MountSpec
 	for _, m := range sandboxProfile.Mounts {
-		extraMounts = append(extraMounts, sandbox.MountSpec{Path: m.Path, Mode: m.Mode})
+		path, mode, _ := config.ParseMount(m) // already validated
+		extraMounts = append(extraMounts, sandbox.MountSpec{Path: path, Mode: mode})
 	}
 
 	// Set up the node creation function

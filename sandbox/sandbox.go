@@ -69,11 +69,39 @@ func GenerateBundle(dir, shell string, extraEnv []string, mountHome bool, extraM
 			"options":     []string{"rbind", "rw"},
 		})
 	} else {
-		// Mount tmpfs over home to mask it from the read-only root bind.
+		// Bind-mount an empty dir over home to mask it from the read-only root.
+		// We use a real directory (not tmpfs) so sub-mount destinations can be
+		// created inside it by the runtime.
+		emptyHome := filepath.Join(rootfs, "empty-home")
+		os.MkdirAll(emptyHome, 0755)
+
+		// Always mount the claudehouse config dir so the MITM proxy CA cert is accessible.
+		chConfigDir := filepath.Join(home, ".config", "claudehouse")
+		extraMounts = append(extraMounts, MountSpec{Path: chConfigDir, Mode: "ro"})
+
+		// Pre-create mount points inside the empty home so runsc can mount over them.
+		for _, m := range extraMounts {
+			if rel, err := filepath.Rel(home, m.Path); err == nil && !filepath.IsAbs(rel) {
+				dest := filepath.Join(emptyHome, rel)
+				// Resolve symlinks to check if source is a file or directory.
+				source := m.Path
+				if resolved, err := filepath.EvalSymlinks(source); err == nil {
+					source = resolved
+				}
+				if info, err := os.Stat(source); err == nil && !info.IsDir() {
+					// File mount: create parent dir and empty file.
+					os.MkdirAll(filepath.Dir(dest), 0755)
+					os.WriteFile(dest, nil, 0644)
+				} else {
+					os.MkdirAll(dest, 0755)
+				}
+			}
+		}
 		mounts = append(mounts, map[string]any{
 			"destination": home,
-			"source":      "tmpfs",
-			"type":        "tmpfs",
+			"source":      emptyHome,
+			"type":        "bind",
+			"options":     []string{"rbind", "rw"},
 		})
 	}
 
@@ -82,9 +110,14 @@ func GenerateBundle(dir, shell string, extraEnv []string, mountHome bool, extraM
 		if m.Mode == "rw" {
 			opts = []string{"rbind", "rw"}
 		}
+		// Resolve symlinks so bind mounts work when the path is a symlink.
+		source := m.Path
+		if resolved, err := filepath.EvalSymlinks(source); err == nil {
+			source = resolved
+		}
 		mounts = append(mounts, map[string]any{
 			"destination": m.Path,
-			"source":      m.Path,
+			"source":      source,
 			"type":        "bind",
 			"options":     opts,
 		})

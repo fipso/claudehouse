@@ -279,12 +279,18 @@ func main() {
 							pendingParent[evt.TerminalID] = evt.StreamID
 						}
 						if an, ok := agentByStream[evt.StreamID]; ok {
-							an.Events() <- evt
+							select {
+							case an.Events() <- evt:
+							default:
+							}
 						}
 
 					default:
 						if an, ok := agentByStream[evt.StreamID]; ok {
-							an.Events() <- evt
+							select {
+							case an.Events() <- evt:
+							default:
+							}
 						}
 					}
 				default:

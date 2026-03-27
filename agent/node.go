@@ -78,7 +78,7 @@ func NewAgentNode(pos rl.Vector2, font rl.Font, fontSize, cellW, cellH int, stre
 		cellW:      cellW,
 		cellH:      cellH,
 		maxRows:    30,
-		events:     make(chan proxy.AgentEvent, 64),
+		events:     make(chan proxy.AgentEvent, 1024),
 	}
 }
 

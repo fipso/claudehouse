@@ -11,11 +11,49 @@ Built with [Raylib](https://www.raylib.com/) + [Ghostty](https://ghostty.org/) t
 Terminals can optionally run inside a [gVisor](https://gvisor.dev/) sandbox for syscall-level isolation. Toggle sandbox mode with `Alt+S` — new terminals will be created inside a gVisor container with:
 
 - Kernel-level syscall interception via gVisor's `runsc`
-- Read-only host filesystem (home directory writable)
+- Read-only host filesystem (home directory writable by default)
 - Network isolation via [pasta](https://passt.top/) (internet access, local IPs blocked)
 - Orange border on sandboxed terminals to distinguish them
 
 Requires `runsc` and `pasta` on `PATH`.
+
+### Sandbox Profiles
+
+Configure named sandbox profiles in `config.toml` to control network access and filesystem mounts:
+
+```toml
+[sandbox.default]
+mount_home = false
+allowed_lan_ranges = ["192.168.1.0/24"]
+mounts = [
+  "/home/user/.claude",
+  "/home/user/.claude.json",
+  "/home/user/code/myproject",
+  "/data/datasets:ro",
+]
+```
+
+- **mount_home** — When `true` (default), the full home directory is mounted read-write. Set to `false` to hide it and use explicit mounts instead.
+- **allowed_lan_ranges** — CIDR ranges to allow through the LAN firewall (all private IPs are blocked by default).
+- **mounts** — Bind mount paths in `"/path:mode"` format. No suffix defaults to `rw`. Supports files and directories. Symlinks are resolved automatically.
+
+The `~/.config/claudehouse/` directory is always mounted read-only inside the sandbox (for the MITM proxy CA cert).
+
+## Configuration
+
+Claudehouse reads its config from `~/.config/claudehouse/config.toml`. An example config is generated on first run. Invalid config will cause the app to exit with an error.
+
+```toml
+# Custom font (leave empty for built-in JetBrains Mono Nerd Font)
+# font = "/path/to/font.ttf"
+
+grid_size = 50.0          # canvas grid point distance in pixels
+snap_to_grid = true       # snap terminals to grid on release
+zoom_to_fit_gap = 100     # pixel gap for Alt+E (zoom to fit)
+fill_viewport_gap = 40    # pixel gap for Alt+F (fill viewport)
+
+default_sandbox_profile = "default"
+```
 
 ## Keybinds
 

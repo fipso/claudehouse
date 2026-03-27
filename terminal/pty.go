@@ -200,31 +200,39 @@ func SpawnSandboxedPTY(shell string, cols, rows uint16, cellW, cellH int, extraE
 		os.RemoveAll(stateDir)
 	}
 
-	// Generate OCI bundle
+	// Start pasta first so we can discover the gateway IP for proxy env vars.
+	var proxyAllowPort int
+	for _, e := range extraEnv {
+		if strings.HasPrefix(e, "CLAUDEHOUSE_PROXY_PORT=") {
+			fmt.Sscanf(strings.TrimPrefix(e, "CLAUDEHOUSE_PROXY_PORT="), "%d", &proxyAllowPort)
+		}
+	}
+	pastaNetns, err := sandbox.StartPasta(proxyAllowPort)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("start pasta: %w", err)
+	}
+
+	// Rewrite proxy env vars to use the gateway IP (which pasta maps to the host).
+	if pastaNetns.GatewayIP != "" && proxyAllowPort > 0 {
+		proxyURL := fmt.Sprintf("http://%s:%d", pastaNetns.GatewayIP, proxyAllowPort)
+		for i, e := range extraEnv {
+			if strings.HasPrefix(e, "HTTPS_PROXY=") {
+				extraEnv[i] = "HTTPS_PROXY=" + proxyURL
+			} else if strings.HasPrefix(e, "HTTP_PROXY=") {
+				extraEnv[i] = "HTTP_PROXY=" + proxyURL
+			}
+		}
+	}
+
+	// Generate OCI bundle (after pasta so env vars have the correct proxy host)
 	if err := sandbox.GenerateBundle(bundleDir, shell, extraEnv); err != nil {
+		pastaNetns.Stop()
 		cleanup()
 		return nil, fmt.Errorf("generate bundle: %w", err)
 	}
 
 	containerID := filepath.Base(bundleDir)
-
-	// Start pasta for network namespace with internet but no local IP access.
-	// proxyAllowHost/Port are parsed from HTTPS_PROXY in extraEnv (if present).
-	var proxyAllowHost string
-	var proxyAllowPort int
-	for _, e := range extraEnv {
-		if strings.HasPrefix(e, "CLAUDEHOUSE_PROXY_HOST=") {
-			proxyAllowHost = strings.TrimPrefix(e, "CLAUDEHOUSE_PROXY_HOST=")
-		}
-		if strings.HasPrefix(e, "CLAUDEHOUSE_PROXY_PORT=") {
-			fmt.Sscanf(strings.TrimPrefix(e, "CLAUDEHOUSE_PROXY_PORT="), "%d", &proxyAllowPort)
-		}
-	}
-	pastaNetns, err := sandbox.StartPasta(bundleDir, proxyAllowHost, proxyAllowPort)
-	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("start pasta: %w", err)
-	}
 
 	// Set up console socket — runsc sends the PTY master FD over this
 	sockPath := filepath.Join(bundleDir, "console.sock")

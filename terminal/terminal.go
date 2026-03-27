@@ -360,7 +360,7 @@ func (tn *TerminalNode) processKey(rlKey int32, action ghostty.KeyAction, charUt
 	tn.keyEvent.SetUnshiftedCodepoint(ucp)
 
 	var consumed ghostty.Mods
-	if ucp != 0 && (mods&ghostty.ModsShift) != 0 {
+	if ucp > 0x20 && (mods&ghostty.ModsShift) != 0 {
 		consumed |= ghostty.ModsShift
 	}
 	tn.keyEvent.SetConsumedMods(consumed)

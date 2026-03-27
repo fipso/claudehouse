@@ -14,28 +14,14 @@ type PastaNetns struct {
 	SleepCmd   *exec.Cmd
 	NsPath     string // /proc/<sleep-pid>/ns/net
 	UserNsPath string // /proc/<sleep-pid>/ns/user
+	GatewayIP  string // default gateway inside namespace (maps to host)
 }
 
 // StartPasta creates a network namespace via pasta with internet access
 // but no direct access to local IPs. Returns the netns path for nsenter.
-// HostIP returns the host's source IP for outbound traffic (used by sandboxed
-// terminals to reach the MITM proxy running on the host).
-func HostIP() (string, error) {
-	out, err := exec.Command("ip", "route", "get", "1.1.1.1").Output()
-	if err != nil {
-		return "", fmt.Errorf("ip route get: %w", err)
-	}
-	// Output: "1.1.1.1 via X.X.X.X dev Y src Z.Z.Z.Z uid N"
-	fields := strings.Fields(string(out))
-	for i, f := range fields {
-		if f == "src" && i+1 < len(fields) {
-			return fields[i+1], nil
-		}
-	}
-	return "", fmt.Errorf("no src in: %s", string(out))
-}
-
-func StartPasta(bundleDir string, proxyAllowHost string, proxyAllowPort int) (*PastaNetns, error) {
+// The gateway IP inside the namespace is mapped to the host by pasta,
+// allowing the sandbox to reach the MITM proxy.
+func StartPasta(proxyAllowPort int) (*PastaNetns, error) {
 	// Step 1: Create a long-lived process in a new user+network namespace.
 	// --user --map-root-user: create user namespace (allows net namespace without root)
 	// --net: create network namespace
@@ -52,7 +38,6 @@ func StartPasta(bundleDir string, proxyAllowHost string, proxyAllowPort int) (*P
 	// pasta will configure the interface and provide NAT.
 	pastaCmd := exec.Command("pasta",
 		"--config-net",
-		"--no-map-gw",
 		"--ns-ifname", "eth0",
 		"-d",
 		fmt.Sprintf("%d", sleepPid),
@@ -83,10 +68,21 @@ func StartPasta(bundleDir string, proxyAllowHost string, proxyAllowPort int) (*P
 		return nil, fmt.Errorf("timeout waiting for pasta setup")
 	}
 
-	// Step 3: Block access to private/LAN IP ranges inside the namespace.
+	// Step 3: Discover the default gateway inside the namespace.
+	// Without --no-map-gw, pasta maps the gateway IP to the host, so the
+	// sandbox can reach the proxy via this address.
+	gwIP, err := namespaceGateway(userNsPath, nsPath)
+	if err != nil {
+		sleepCmd.Process.Kill()
+		sleepCmd.Wait()
+		return nil, fmt.Errorf("discover gateway: %w", err)
+	}
+
+	// Step 4: Block access to private/LAN IP ranges inside the namespace.
 	// pasta provides full NAT by default — without these rules, the sandbox
 	// can reach devices on the local network.
-	if err := blockLANAccess(userNsPath, nsPath, proxyAllowHost, proxyAllowPort); err != nil {
+	// The proxy is whitelisted via gwIP:proxyAllowPort before the REJECT rules.
+	if err := blockLANAccess(userNsPath, nsPath, gwIP, proxyAllowPort); err != nil {
 		sleepCmd.Process.Kill()
 		sleepCmd.Wait()
 		return nil, fmt.Errorf("block LAN access: %w", err)
@@ -97,7 +93,30 @@ func StartPasta(bundleDir string, proxyAllowHost string, proxyAllowPort int) (*P
 		SleepCmd:   sleepCmd,
 		NsPath:     nsPath,
 		UserNsPath: userNsPath,
+		GatewayIP:  gwIP,
 	}, nil
+}
+
+// namespaceGateway returns the default gateway IP inside the given network namespace.
+func namespaceGateway(userNsPath, nsPath string) (string, error) {
+	out, err := exec.Command("nsenter",
+		"--user="+userNsPath,
+		"--net="+nsPath,
+		"--preserve-credentials",
+		"--",
+		"ip", "route", "show", "default",
+	).Output()
+	if err != nil {
+		return "", fmt.Errorf("ip route show default: %w", err)
+	}
+	// Output: "default via X.X.X.X dev eth0 ..."
+	fields := strings.Fields(string(out))
+	for i, f := range fields {
+		if f == "via" && i+1 < len(fields) {
+			return fields[i+1], nil
+		}
+	}
+	return "", fmt.Errorf("no gateway in: %s", string(out))
 }
 
 // blockLANAccess adds iptables/ip6tables rules inside the network namespace

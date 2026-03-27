@@ -11,7 +11,6 @@ import (
 	"claudehouse/agent"
 	"claudehouse/canvas"
 	"claudehouse/proxy"
-	"claudehouse/sandbox"
 	"claudehouse/terminal"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
@@ -120,19 +119,9 @@ func main() {
 			"NODE_EXTRA_CA_CERTS=" + mitmProxy.CA.CertPath,
 		}
 		if sandboxed {
-			hostIP, err := sandbox.HostIP()
-			if err == nil {
-				proxyURL = fmt.Sprintf("http://%s:%d", hostIP, tp.Port)
-				env = []string{
-					"HTTPS_PROXY=" + proxyURL,
-					"HTTP_PROXY=" + proxyURL,
-					"NODE_EXTRA_CA_CERTS=" + mitmProxy.CA.CertPath,
-					"CLAUDEHOUSE_PROXY_HOST=" + hostIP,
-					fmt.Sprintf("CLAUDEHOUSE_PROXY_PORT=%d", tp.Port),
-				}
-			} else {
-				log.Printf("WARNING: could not determine host IP for sandbox proxy: %v", err)
-			}
+			// HTTPS_PROXY/HTTP_PROXY will be rewritten by SpawnSandboxedPTY
+			// to use the pasta gateway IP (which maps to the host).
+			env = append(env, fmt.Sprintf("CLAUDEHOUSE_PROXY_PORT=%d", tp.Port))
 		}
 		return env
 	}

@@ -12,7 +12,7 @@ import (
 	"claudehouse/canvas"
 	"claudehouse/config"
 	"claudehouse/proxy"
-	"claudehouse/sandbox"
+	"claudebox"
 	"claudehouse/terminal"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
@@ -156,12 +156,12 @@ func main() {
 	c := canvas.NewCanvas()
 	defer c.FreeAll()
 
-	// Convert active sandbox profile mounts to sandbox.MountSpec.
+	// Convert active sandbox profile mounts to claudebox.MountSpec.
 	sandboxProfile := cfg.ActiveSandboxProfile()
-	var extraMounts []sandbox.MountSpec
+	var extraMounts []claudebox.MountSpec
 	for _, m := range sandboxProfile.Mounts {
 		path, mode, _ := config.ParseMount(m) // already validated
-		extraMounts = append(extraMounts, sandbox.MountSpec{Path: path, Mode: mode})
+		extraMounts = append(extraMounts, claudebox.MountSpec{Path: path, Mode: mode})
 	}
 
 	// Set up the node creation function

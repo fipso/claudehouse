@@ -1,31 +1,26 @@
 package terminal
 
 import (
-	"bytes"
-	"claudehouse/sandbox"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
+
+	"claudebox"
 
 	"github.com/creack/pty"
 )
 
 type PTY struct {
-	ptmx        *os.File
-	cmd         *exec.Cmd
-	output      chan []byte
-	done        chan struct{}
-	bundleDir   string              // non-empty for sandboxed PTYs
-	stateDir    string              // runsc state dir
-	containerID string
-	pastaNetns  *sandbox.PastaNetns // non-nil for sandboxed PTYs with networking
+	ptmx       *os.File
+	cmd        *exec.Cmd
+	output     chan []byte
+	done       chan struct{}
+	sandboxPTY *claudebox.SandboxedPTY // non-nil for sandboxed PTYs
 }
 
 func defaultShell() string {
@@ -77,6 +72,39 @@ func SpawnPTY(shell string, cols, rows uint16, cellW, cellH int, extraEnv []stri
 	return p, nil
 }
 
+func SpawnSandboxedPTY(shell string, cols, rows uint16, cellW, cellH int, extraEnv []string, allowedLANRanges []string, mountHome bool, extraMounts []claudebox.MountSpec) (*PTY, error) {
+	// Extract proxy port from CLAUDEHOUSE_PROXY_PORT env var (set by makeProxyEnv).
+	var proxyAllowPort int
+	var filteredEnv []string
+	for _, e := range extraEnv {
+		if strings.HasPrefix(e, "CLAUDEHOUSE_PROXY_PORT=") {
+			fmt.Sscanf(strings.TrimPrefix(e, "CLAUDEHOUSE_PROXY_PORT="), "%d", &proxyAllowPort)
+		} else {
+			filteredEnv = append(filteredEnv, e)
+		}
+	}
+	extraEnv = filteredEnv
+
+	// Always mount the claudehouse config dir so the MITM proxy CA cert is accessible.
+	if !mountHome {
+		homeDir, _ := os.UserHomeDir()
+		chConfigDir := filepath.Join(homeDir, ".config", "claudehouse")
+		extraMounts = append(extraMounts, claudebox.MountSpec{Path: chConfigDir, Mode: "ro"})
+	}
+
+	spty, err := claudebox.SpawnSandboxedPTY(shell, cols, rows, cellW, cellH, extraEnv, allowedLANRanges, proxyAllowPort, mountHome, extraMounts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &PTY{
+		ptmx:       nil, // managed by sandboxPTY
+		sandboxPTY: spty,
+		output:     make(chan []byte, 256),
+		done:       make(chan struct{}),
+	}, nil
+}
+
 func (p *PTY) readLoop() {
 	defer close(p.done)
 	buf := make([]byte, 4096)
@@ -104,18 +132,32 @@ func isEIO(err error) bool {
 }
 
 func (p *PTY) Output() <-chan []byte {
+	if p.sandboxPTY != nil {
+		return p.sandboxPTY.Output()
+	}
 	return p.output
 }
 
 func (p *PTY) Done() <-chan struct{} {
+	if p.sandboxPTY != nil {
+		return p.sandboxPTY.Done()
+	}
 	return p.done
 }
 
 func (p *PTY) Write(data []byte) {
+	if p.sandboxPTY != nil {
+		p.sandboxPTY.Write(data)
+		return
+	}
 	_, _ = p.ptmx.Write(data)
 }
 
 func (p *PTY) Resize(cols, rows uint16, cellW, cellH int) {
+	if p.sandboxPTY != nil {
+		p.sandboxPTY.Resize(cols, rows, cellW, cellH)
+		return
+	}
 	pty.Setsize(p.ptmx, &pty.Winsize{
 		Rows: rows,
 		Cols: cols,
@@ -125,10 +167,17 @@ func (p *PTY) Resize(cols, rows uint16, cellW, cellH int) {
 }
 
 func (p *PTY) Fd() int {
+	if p.sandboxPTY != nil {
+		return p.sandboxPTY.Fd()
+	}
 	return int(p.ptmx.Fd())
 }
 
 func (p *PTY) Close() {
+	if p.sandboxPTY != nil {
+		p.sandboxPTY.Close()
+		return
+	}
 	// Signal the process to exit, then close the master pty fd.
 	if p.cmd.Process != nil {
 		p.cmd.Process.Signal(syscall.SIGHUP)
@@ -137,197 +186,5 @@ func (p *PTY) Close() {
 
 	go func() {
 		p.cmd.Wait()
-		// Clean up sandbox resources
-		if p.containerID != "" {
-			exec.Command("runsc", "--root="+p.stateDir, "kill", p.containerID, "KILL").Run()
-			exec.Command("runsc", "--root="+p.stateDir, "delete", p.containerID).Run()
-		}
-		if p.bundleDir != "" {
-			os.RemoveAll(p.bundleDir)
-		}
-		if p.stateDir != "" {
-			os.RemoveAll(p.stateDir)
-		}
-		if p.pastaNetns != nil {
-			p.pastaNetns.Stop()
-		}
 	}()
-}
-
-// recvFd receives a file descriptor over a Unix socket via SCM_RIGHTS.
-func recvFd(conn *net.UnixConn) (*os.File, error) {
-	buf := make([]byte, 1)
-	oob := make([]byte, syscall.CmsgSpace(4))
-	_, oobn, _, _, err := conn.ReadMsgUnix(buf, oob)
-	if err != nil {
-		return nil, fmt.Errorf("ReadMsgUnix: %w", err)
-	}
-	msgs, err := syscall.ParseSocketControlMessage(oob[:oobn])
-	if err != nil {
-		return nil, fmt.Errorf("ParseSocketControlMessage: %w", err)
-	}
-	for _, msg := range msgs {
-		fds, err := syscall.ParseUnixRights(&msg)
-		if err != nil {
-			continue
-		}
-		if len(fds) > 0 {
-			return os.NewFile(uintptr(fds[0]), "console"), nil
-		}
-	}
-	return nil, fmt.Errorf("no fd received")
-}
-
-func SpawnSandboxedPTY(shell string, cols, rows uint16, cellW, cellH int, extraEnv []string, allowedLANRanges []string, mountHome bool, extraMounts []sandbox.MountSpec) (*PTY, error) {
-	if shell == "" {
-		shell = defaultShell()
-	}
-
-	// Create temp dirs for bundle and state
-	bundleDir, err := os.MkdirTemp("", "claudehouse-bundle-")
-	if err != nil {
-		return nil, fmt.Errorf("create bundle dir: %w", err)
-	}
-
-	stateDir, err := os.MkdirTemp("", "claudehouse-state-")
-	if err != nil {
-		os.RemoveAll(bundleDir)
-		return nil, fmt.Errorf("create state dir: %w", err)
-	}
-
-	cleanup := func() {
-		os.RemoveAll(bundleDir)
-		os.RemoveAll(stateDir)
-	}
-
-	// Start pasta first so we can discover the gateway IP for proxy env vars.
-	var proxyAllowPort int
-	for _, e := range extraEnv {
-		if strings.HasPrefix(e, "CLAUDEHOUSE_PROXY_PORT=") {
-			fmt.Sscanf(strings.TrimPrefix(e, "CLAUDEHOUSE_PROXY_PORT="), "%d", &proxyAllowPort)
-		}
-	}
-	pastaNetns, err := sandbox.StartPasta(proxyAllowPort, allowedLANRanges)
-	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("start pasta: %w", err)
-	}
-
-	// Rewrite proxy env vars to use the gateway IP (which pasta maps to the host).
-	if pastaNetns.GatewayIP != "" && proxyAllowPort > 0 {
-		proxyURL := fmt.Sprintf("http://%s:%d", pastaNetns.GatewayIP, proxyAllowPort)
-		for i, e := range extraEnv {
-			if strings.HasPrefix(e, "HTTPS_PROXY=") {
-				extraEnv[i] = "HTTPS_PROXY=" + proxyURL
-			} else if strings.HasPrefix(e, "HTTP_PROXY=") {
-				extraEnv[i] = "HTTP_PROXY=" + proxyURL
-			}
-		}
-	}
-
-	// Generate OCI bundle (after pasta so env vars have the correct proxy host)
-	if err := sandbox.GenerateBundle(bundleDir, shell, extraEnv, mountHome, extraMounts); err != nil {
-		pastaNetns.Stop()
-		cleanup()
-		return nil, fmt.Errorf("generate bundle: %w", err)
-	}
-
-	containerID := filepath.Base(bundleDir)
-
-	// Set up console socket — runsc sends the PTY master FD over this
-	sockPath := filepath.Join(bundleDir, "console.sock")
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: sockPath, Net: "unix"})
-	if err != nil {
-		pastaNetns.Stop()
-		cleanup()
-		return nil, fmt.Errorf("listen console socket: %w", err)
-	}
-
-	// Channel to receive the PTY master from the console socket
-	type consoleResult struct {
-		file *os.File
-		err  error
-	}
-	consoleCh := make(chan consoleResult, 1)
-	go func() {
-		defer listener.Close()
-		conn, err := listener.AcceptUnix()
-		if err != nil {
-			consoleCh <- consoleResult{err: fmt.Errorf("accept: %w", err)}
-			return
-		}
-		defer conn.Close()
-		f, err := recvFd(conn)
-		consoleCh <- consoleResult{file: f, err: err}
-	}()
-
-	// Run runsc inside pasta's network namespace via nsenter
-	cmd := exec.Command("nsenter",
-		"--user="+pastaNetns.UserNsPath,
-		"--net="+pastaNetns.NsPath,
-		"--preserve-credentials",
-		"--",
-		"runsc",
-		"--root="+stateDir,
-		"--rootless",
-		"--platform=systrap",
-		"--network=host",
-		"--ignore-cgroups",
-		"run",
-		"--bundle="+bundleDir,
-		"--console-socket="+sockPath,
-		containerID,
-	)
-	var runscStderr bytes.Buffer
-	cmd.Stderr = &runscStderr
-
-	if err := cmd.Start(); err != nil {
-		listener.Close()
-		pastaNetns.Stop()
-		cleanup()
-		return nil, fmt.Errorf("start runsc: %w", err)
-	}
-
-	// Wait for console PTY master from runsc (with timeout)
-	var result consoleResult
-	select {
-	case result = <-consoleCh:
-	case <-time.After(10 * time.Second):
-		cmd.Process.Kill()
-		cmd.Wait()
-		pastaNetns.Stop()
-		cleanup()
-		return nil, fmt.Errorf("timeout waiting for console socket from runsc\nstderr: %s", runscStderr.String())
-	}
-	if result.err != nil {
-		cmd.Process.Kill()
-		cmd.Wait()
-		pastaNetns.Stop()
-		cleanup()
-		return nil, fmt.Errorf("receive console fd: %w", result.err)
-	}
-
-	ptmx := result.file
-
-	// Set initial terminal size
-	pty.Setsize(ptmx, &pty.Winsize{
-		Rows: rows,
-		Cols: cols,
-		X:    cols * uint16(cellW),
-		Y:    rows * uint16(cellH),
-	})
-
-	p := &PTY{
-		ptmx:        ptmx,
-		cmd:         cmd,
-		output:      make(chan []byte, 256),
-		done:        make(chan struct{}),
-		bundleDir:   bundleDir,
-		stateDir:    stateDir,
-		containerID: containerID,
-		pastaNetns:  pastaNetns,
-	}
-
-	go p.readLoop()
-	return p, nil
 }

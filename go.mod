@@ -2,6 +2,8 @@ module claudehouse
 
 go 1.25.7
 
+require claudebox v0.0.0
+
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/creack/pty v1.1.24
@@ -14,6 +16,8 @@ require (
 	github.com/ebitengine/purego v0.7.1 // indirect
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/net v0.43.0 // indirect
-	golang.org/x/sys v0.35.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 )
+
+replace claudebox => ../claudebox

@@ -3,7 +3,7 @@ package terminal
 import (
 	"claudehouse/canvas"
 	"claudehouse/ghostty"
-	"claudehouse/sandbox"
+	"claudebox"
 	"math"
 	"os/exec"
 	"strings"
@@ -55,7 +55,7 @@ type TerminalNode struct {
 	selCopyTimer float64 // debounce timer for clipboard copy
 }
 
-func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, cellW, cellH int, shell string, sandboxed bool, proxyEnv []string, allowedLANRanges []string, mountHome bool, extraMounts []sandbox.MountSpec) (*TerminalNode, error) {
+func NewTerminalNode(pos rl.Vector2, cols, rows uint16, font rl.Font, fontSize, cellW, cellH int, shell string, sandboxed bool, proxyEnv []string, allowedLANRanges []string, mountHome bool, extraMounts []claudebox.MountSpec) (*TerminalNode, error) {
 	term, err := ghostty.NewTerminal(cols, rows, 1000)
 	if err != nil {
 		return nil, err

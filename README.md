@@ -8,14 +8,7 @@ Built with [Raylib](https://www.raylib.com/) + [Ghostty](https://ghostty.org/) t
 
 ## Sandbox
 
-Terminals can optionally run inside a [gVisor](https://gvisor.dev/) sandbox for syscall-level isolation. Toggle sandbox mode with `Alt+S` — new terminals will be created inside a gVisor container with:
-
-- Kernel-level syscall interception via gVisor's `runsc`
-- Read-only host filesystem (home directory writable by default)
-- Network isolation via [pasta](https://passt.top/) (internet access, local IPs blocked)
-- Orange border on sandboxed terminals to distinguish them
-
-Requires `runsc` and `pasta` on `PATH`.
+Terminals can optionally run inside a sandbox powered by [claudebox](https://github.com/fipso/claudebox). Toggle sandbox mode with `Alt+S` — sandboxed terminals get an orange border and run with gVisor syscall isolation + pasta network namespacing. See the [claudebox README](https://github.com/fipso/claudebox) for details on how the sandbox works and standalone CLI usage.
 
 ### Sandbox Profiles
 

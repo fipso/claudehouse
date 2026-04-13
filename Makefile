@@ -29,7 +29,7 @@ $(FONT_FILE):
 
 # Build the Go binary (run inside nix-shell for system headers, or set CGO_CFLAGS)
 claudehouse: $(GHOSTTY_LIB) $(FONT_FILE) $(GO_SRCS)
-	CGO_ENABLED=1 GOFLAGS=-mod=mod go build -buildvcs=false -o claudehouse .
+	CGO_ENABLED=1 GOWORK=off go build -mod=mod -buildvcs=false -o claudehouse .
 
 # Build and run
 run: claudehouse
